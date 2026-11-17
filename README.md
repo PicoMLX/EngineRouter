@@ -12,22 +12,81 @@ routes each model to the engine that can serve it.
 
 ## Status
 
-Early. This repository currently holds the package skeleton and this note.
-The engine interface, the router and the first adapters land in the pull
-requests that follow.
+Early. The engine interface, the router and the Local Code adapter exist.
+The MLX and mlx-serve adapters are next.
+
+## Using it
+
+```swift
+import EngineRouter
+import EngineRouterLocalCode
+
+let router = Router(
+    engines: [try LocalCodeEngine(libraryURL: libraryURL)],
+    memoryBudget: 96 << 30)
+
+let model = try await router.open(EngineModel(id: "deepseek-4.1-flash", directory: modelDirectory))
+let prompt = try await model.tokenize("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+for try await event in model.generate(EngineRequest(promptTokens: prompt, maxTokens: 256)) {
+    switch event {
+    case .tokens(let ids): print(try await model.detokenize(ids), terminator: "")
+    case .finished(let completion): print("\n\(completion.generatedTokenCount) tokens")
+    }
+}
+await router.close(model.id)
+```
+
+The interface is token-level: the app renders the chat template and parses
+tool calls, so both behave the same on every engine. Cancelling the task that
+consumes a request's stream cancels the request.
+
+`Router.open` goes to the first engine whose `canServe` accepts the model and
+charges the model's `loadBytes` against the budget. It throws when the model
+does not fit or when an exclusive engine is involved; the router never closes
+a model on its own, so the caller decides what to close.
 
 ## Engines
 
 | Engine | How it is sourced | Licence | State |
 |---|---|---|---|
 | [mlx-swift-lm](https://github.com/ronaldmannak/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | Planned (`EngineRouterMLX`) |
-| [Local Code](https://github.com/drawthingsai/local-code-community) | Our fork, built locally into a dynamic library | GPL-3.0 | Planned (`EngineRouterLocalCode`); see the licence note |
+| [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/pico/native-bridge), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
 | [TensorFold](https://github.com/ashhart/TensorFold) | A fork, when that adapter starts | Apache-2.0 | Later |
 
 Each adapter is its own library product. An app that depends only on
 `EngineRouter` links no engine.
+
+## Building the Local Code library
+
+`EngineRouterLocalCode` loads `PicoLocalCodeNative.dylib`, which you build
+from the `pico/native-bridge` branch of the fork with Xcode and
+[Bazelisk](https://github.com/bazelbuild/bazelisk) on Apple silicon:
+
+```sh
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch pico/native-bridge https://github.com/PicoMLX/local-code-community.git
+cd local-code-community
+ln -s WORKSPACE.darwin WORKSPACE
+echo 'try-import %workspace%/.bazelrc.darwin' > .bazelrc
+bazelisk build -c opt //Apps/LocalCode:PicoLocalCodeNative
+```
+
+The library is `bazel-bin/Apps/LocalCode/PicoLocalCodeNative.dylib`. It
+requires macOS 27.
+
+A model directory holds the `.ckpt` checkpoint, its `.engram` file with the
+same base name, and optionally the DSpark drafter (a second `.ckpt` whose name
+contains `dspark`). To run the live test against it:
+
+```sh
+ENGINEROUTER_LOCAL_CODE_LIBRARY=/path/to/PicoLocalCodeNative.dylib \
+ENGINEROUTER_LOCAL_CODE_MODEL_DIR=/path/to/deepseek \
+swift test --filter LocalCodeLiveTests
+```
+
+Each request starts from an empty KV cache, requests run one at a time, and a
+`temperature` other than 0 samples with the model's own settings.
 
 ## Licence note
 
