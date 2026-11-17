@@ -1,5 +1,6 @@
 import EngineRouter
 import Foundation
+import Synchronization
 import Testing
 
 struct RouterTests {
@@ -72,6 +73,69 @@ struct RouterTests {
         _ = try await router.open(model("a-two"))
         #expect(engine.log.closed == ["a-one"])
         #expect(await router.status().map(\.model) == ["a-two"])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aClosingModelKeepsItsBytesUntilItHasClosed() async throws {
+        let engine = StubEngine(name: "a", closeGate: StubEngine.Gate())
+        let router = Router(engines: [engine], memoryBudget: 150)
+        _ = try await router.open(model("a-one"))
+        let closing = Task { await router.close("a-one") }
+        await engine.log.waitForCloseStart()
+
+        await #expect(throws: RouterError.insufficientMemory(needed: 100, available: 50)) {
+            try await router.open(model("a-two"))
+        }
+
+        engine.closeGate?.open()
+        await closing.value
+        _ = try await router.open(model("a-two"))
+        #expect(await router.status().map(\.model) == ["a-two"])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aClosingExclusiveModelStillKeepsOthersOut() async throws {
+        let solo = StubEngine(name: "solo", isExclusive: true, closeGate: StubEngine.Gate())
+        let router = Router(engines: [StubEngine(name: "a"), solo], memoryBudget: 1000)
+        _ = try await router.open(model("solo-one"))
+        let closing = Task { await router.close("solo-one") }
+        await solo.log.waitForCloseStart()
+
+        await #expect(throws: RouterError.exclusiveConflict(openModels: ["solo-one"])) {
+            try await router.open(model("a-one"))
+        }
+
+        solo.closeGate?.open()
+        await closing.value
+        _ = try await router.open(model("a-one"))
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func reopeningAClosingModelWaitsForTheCloseThenOpensAfresh() async throws {
+        let engine = StubEngine(name: "a", closeGate: StubEngine.Gate())
+        let router = Router(engines: [engine], memoryBudget: 100)
+        _ = try await router.open(model("a-one"))
+        let closing = Task { await router.close("a-one") }
+        await engine.log.waitForCloseStart()
+
+        let reopened = Mutex(false)
+        let reopening = Task {
+            _ = try await router.open(self.model("a-one"))
+            reopened.withLock { $0 = true }
+        }
+        // The reopen cannot finish while the close is held.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!reopened.withLock { $0 })
+        engine.closeGate?.open()
+        try await reopening.value
+        await closing.value
+
+        #expect(engine.log.closed == ["a-one"])
+        #expect(await router.status() == [
+            ModelStatus(
+                model: "a-one", engine: "a", loadBytes: 100,
+                memory: EngineMemory(active: 100, cache: 10, peak: 100))
+        ])
     }
 
     @Test
