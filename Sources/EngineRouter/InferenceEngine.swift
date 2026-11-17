@@ -58,7 +58,8 @@ public protocol LoadedModel: Sendable {
     /// Drops caches to free about `bytes`. Returns the bytes freed.
     func trim(toFree bytes: Int) async -> Int
 
-    /// Cancels every running request and releases the model.
+    /// Cancels every running request and releases the model. Afterwards
+    /// `generate` finishes by throwing.
     func close() async
 }
 

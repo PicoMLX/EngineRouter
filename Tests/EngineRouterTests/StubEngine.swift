@@ -13,6 +13,9 @@ struct StubEngine: InferenceEngine {
     var tokens: [Int] = [1, 2, 3]
     /// When set, a request waits here after its first token until cancelled.
     var stallsAfterFirstToken = false
+    /// Faults for the contract tests to catch.
+    var ignoresMaxTokens = false
+    var servesAfterClose = false
     let log = Log()
 
     func canServe(_ model: EngineModel) async -> Bool { model.id.hasPrefix(name) }
@@ -49,7 +52,7 @@ struct StubEngine: InferenceEngine {
     }
 }
 
-enum StubError: Error { case cannotOpen }
+enum StubError: Error { case cannotOpen, closed }
 
 struct StubModel: LoadedModel {
     let engine: StubEngine
@@ -63,7 +66,11 @@ struct StubModel: LoadedModel {
 
     func generate(_ request: EngineRequest) -> AsyncThrowingStream<EngineEvent, any Error> {
         let (stream, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
-        let produced = Array(engine.tokens.prefix(request.maxTokens ?? .max))
+        if engine.log.closed.contains(id), !engine.servesAfterClose {
+            continuation.finish(throwing: StubError.closed)
+            return stream
+        }
+        let produced = Array(engine.tokens.prefix(engine.ignoresMaxTokens ? .max : request.maxTokens ?? .max))
         let stalls = engine.stallsAfterFirstToken
         let log = engine.log
         let task = Task {
