@@ -61,11 +61,17 @@ public struct LocalCodeEngine: InferenceEngine {
                 }
             }
             guard let pointer else {
-                throw LocalCodeError.model(String(decoding: message.prefix { $0 != 0 }.map(UInt8.init), as: UTF8.self))
+                throw LocalCodeError.model(string(fromUTF8: message))
             }
             return ModelHandle(pointer: pointer)
         }
     }
+}
+
+/// The text in a C buffer of UTF-8, up to its first NUL. `CChar` is signed, so
+/// a byte above 127 is negative here and is reinterpreted, not converted.
+func string(fromUTF8 buffer: [CChar]) -> String {
+    String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 
 /// The library's opaque model handle. Used only on `LocalCodeLibrary.queue`.
@@ -131,7 +137,7 @@ final class LocalCodeModel: LoadedModel {
         let length = library.detokenize(ids, Int32(ids.count), nil, 0)
         var text = [CChar](repeating: 0, count: Int(length) + 1)
         _ = library.detokenize(ids, Int32(ids.count), &text, Int32(text.count))
-        return String(decoding: text.dropLast().map(UInt8.init), as: UTF8.self)
+        return string(fromUTF8: text)
     }
 
     /// `temperature` 0 picks the most likely token; any other value samples
