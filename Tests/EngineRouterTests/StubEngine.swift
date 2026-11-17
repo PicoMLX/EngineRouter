@@ -13,6 +13,8 @@ struct StubEngine: InferenceEngine {
     var tokens: [Int] = [1, 2, 3]
     /// When set, a request waits here after its first token until cancelled.
     var stallsAfterFirstToken = false
+    /// When set, `close` waits here before the model lets go.
+    var closeGate: Gate?
     /// Faults for the contract tests to catch.
     var ignoresMaxTokens = false
     var servesAfterClose = false
@@ -32,8 +34,13 @@ struct StubEngine: InferenceEngine {
         private let state = Mutex<(closed: [String], cancelled: Int, trimmed: Int)>(([], 0, 0))
         private let cancellations: AsyncStream<Void>
         private let cancellationSignal: AsyncStream<Void>.Continuation
+        private let closeStarts: AsyncStream<Void>
+        private let closeStartSignal: AsyncStream<Void>.Continuation
 
-        init() { (cancellations, cancellationSignal) = AsyncStream.makeStream() }
+        init() {
+            (cancellations, cancellationSignal) = AsyncStream.makeStream()
+            (closeStarts, closeStartSignal) = AsyncStream.makeStream()
+        }
 
         var closed: [String] { state.withLock { $0.closed } }
         var trimmed: Int { state.withLock { $0.trimmed } }
@@ -48,6 +55,37 @@ struct StubEngine: InferenceEngine {
         /// Returns once a request has been cancelled.
         func waitForCancellation() async {
             for await _ in cancellations { return }
+        }
+
+        func closeStarted() { closeStartSignal.yield() }
+
+        /// Returns once a model has entered `close`.
+        func waitForCloseStart() async {
+            for await _ in closeStarts { return }
+        }
+    }
+
+    /// Holds callers of `wait` until `open` is called.
+    final class Gate: Sendable {
+        private let state = Mutex<(isOpen: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
+
+        func wait() async {
+            await withCheckedContinuation { continuation in
+                let isOpen = state.withLock { state in
+                    if !state.isOpen { state.waiters.append(continuation) }
+                    return state.isOpen
+                }
+                if isOpen { continuation.resume() }
+            }
+        }
+
+        func open() {
+            let waiters = state.withLock { state in
+                state.isOpen = true
+                defer { state.waiters = [] }
+                return state.waiters
+            }
+            for waiter in waiters { waiter.resume() }
         }
     }
 }
@@ -107,5 +145,9 @@ struct StubModel: LoadedModel {
         return freed
     }
 
-    func close() async { engine.log.close(id) }
+    func close() async {
+        engine.log.closeStarted()
+        await engine.closeGate?.wait()
+        engine.log.close(id)
+    }
 }

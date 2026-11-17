@@ -12,6 +12,9 @@ public actor Router {
         let opening: Task<any LoadedModel, any Error>
         /// Set once `opening` has succeeded.
         var model: (any LoadedModel)?
+        /// Set while `close` is running. The entry stays until it finishes, so
+        /// the model keeps its bytes and its exclusivity until it has let go.
+        var closing: Task<Void, Never>?
     }
 
     private let engines: [any InferenceEngine]
@@ -27,9 +30,10 @@ public actor Router {
         self.memoryBudget = memoryBudget
     }
 
-    /// Opens `model`, or returns it when it is already open or opening.
+    /// Opens `model`, or returns it when it is already open or opening. A
+    /// model that is closing finishes closing first and then opens afresh.
     public func open(_ model: EngineModel) async throws -> any LoadedModel {
-        if let entry = entries[model.id] { return try await entry.opening.value }
+        if let loaded = try await existing(model.id) { return loaded }
 
         var serving: (any InferenceEngine)?
         for engine in engines where await engine.canServe(model) {
@@ -40,7 +44,7 @@ public actor Router {
         let bytes = try await engine.loadBytes(model)
 
         // Another caller may have opened this model during the awaits above.
-        if let entry = entries[model.id] { return try await entry.opening.value }
+        if let loaded = try await existing(model.id) { return loaded }
         try admit(engine, loadBytes: bytes)
 
         // No suspension between `admit` and this insert, so two openers cannot
@@ -58,14 +62,38 @@ public actor Router {
         }
     }
 
-    /// Closes the model and returns its bytes to the budget. Does nothing for a
-    /// model that is not open.
+    /// Closes the model, then returns its bytes to the budget. Does nothing
+    /// for a model that is not open.
     public func close(_ modelID: String) async {
-        guard let entry = entries.removeValue(forKey: modelID) else { return }
-        if let model = try? await entry.opening.value { await model.close() }
+        guard let entry = entries[modelID] else { return }
+        let closing: Task<Void, Never>
+        if let running = entry.closing {
+            closing = running
+        } else {
+            closing = Task { if let model = try? await entry.opening.value { await model.close() } }
+            entries[modelID]?.closing = closing
+        }
+        await closing.value
+        finishClosing(modelID, closing)
     }
 
-    /// Every open or opening model, sorted by ID.
+    /// The model under `id` when it is open or opening, after waiting out a
+    /// close in progress; `nil` once nothing holds the ID.
+    private func existing(_ id: String) async throws -> (any LoadedModel)? {
+        while let entry = entries[id] {
+            guard let closing = entry.closing else { return try await entry.opening.value }
+            await closing.value
+            // Whoever resumes first removes the entry, so this loop ends.
+            finishClosing(id, closing)
+        }
+        return nil
+    }
+
+    private func finishClosing(_ id: String, _ closing: Task<Void, Never>) {
+        if entries[id]?.closing == closing { entries[id] = nil }
+    }
+
+    /// Every model that holds budget, sorted by ID: open, opening or closing.
     public func status() async -> [ModelStatus] {
         var result: [ModelStatus] = []
         for (id, entry) in entries.sorted(by: { $0.key < $1.key }) {
@@ -80,7 +108,7 @@ public actor Router {
     public func trim(toFree bytes: Int) async -> Int {
         var freed = 0
         for entry in entries.values {
-            guard freed < bytes, let model = entry.model else { continue }
+            guard freed < bytes, entry.closing == nil, let model = entry.model else { continue }
             freed += await model.trim(toFree: bytes - freed)
         }
         return freed

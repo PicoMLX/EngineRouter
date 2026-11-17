@@ -47,6 +47,15 @@ struct LocalCodeModelFilesTests {
     }
 
     @Test
+    func textFromTheLibraryKeepsItsNonASCIICharacters() {
+        let text = "café 日本語 🙂 — done"
+        // What the library writes: UTF-8 as signed C characters, NUL-terminated.
+        let buffer = text.utf8CString.map { $0 } + [0x41]
+
+        #expect(string(fromUTF8: buffer) == text)
+    }
+
+    @Test
     func aMissingLibraryIsReportedWhenTheEngineIsCreated() {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).dylib")
 
@@ -87,6 +96,8 @@ struct LocalCodeLiveTests {
         #expect(prompt.first == 0)
         #expect(prompt.contains(128_803))
         #expect(try await loaded.detokenize(try await loaded.tokenize(Self.question)) == Self.question)
+        let accented = "Crème brûlée, 日本語, 🙂"
+        #expect(try await loaded.detokenize(try await loaded.tokenize(accented)) == accented)
 
         // A greedy request runs to the model's stop token.
         let (tokens, completion) = try await run(
