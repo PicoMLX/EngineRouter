@@ -39,6 +39,10 @@ for try await event in model.generate(EngineRequest(promptTokens: prompt, maxTok
 await router.close(model.id)
 ```
 
+A completion whose reason is `.stop` names the token that stopped the reply in
+`stopToken`, for chat formats that end a reply with different tokens for
+different outcomes.
+
 A character can span several tokens, and half of one decodes to nothing or to
 U+FFFD, so decode tokens together, never one event at a time. To show text as
 it arrives, decode the reply so far and emit what that adds to the text
@@ -85,6 +89,8 @@ let router = Router(engines: [MLXEngine()], memoryBudget: 96 << 30)
   reports the same `cache`, and `trim` drops all of it.
 - A request that sets no `temperature` or `topP` uses the model's own
   generation settings.
+- Tokens arrive one behind the model: the newest is held until the next shows
+  it was not the stop token.
 
 The package depends on the PicoMLX forks of mlx-swift and mlx-swift-lm at the
 branch `pico/integration`. SwiftPM wants one branch requirement for a package

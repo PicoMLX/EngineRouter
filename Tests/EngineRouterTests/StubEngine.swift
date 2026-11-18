@@ -19,6 +19,7 @@ struct StubEngine: InferenceEngine {
     var ignoresMaxTokens = false
     var servesAfterClose = false
     var failsToTokenize = false
+    var namesAStopTokenAtTheLimit = false
     let log = Log()
 
     func canServe(_ model: EngineModel) async -> Bool { model.id.hasPrefix(name) }
@@ -131,10 +132,12 @@ final class StubModel: LoadedModel {
                     return
                 }
             }
+            let stopped = produced.count == engine.tokens.count
             continuation.yield(.finished(EngineCompletion(
-                reason: produced.count < engine.tokens.count ? .length : .stop,
+                reason: stopped ? .stop : .length,
                 promptTokenCount: request.promptTokens.count, generatedTokenCount: produced.count,
-                promptTime: 0, generationTime: 0)))
+                promptTime: 0, generationTime: 0,
+                stopToken: stopped || engine.namesAStopTokenAtTheLimit ? 0 : nil)))
             continuation.finish()
         }
         continuation.onTermination = { termination in

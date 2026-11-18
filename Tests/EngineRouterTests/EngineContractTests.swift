@@ -27,6 +27,14 @@ struct EngineContractTests {
     }
 
     @Test
+    func anEngineThatNamesAStopTokenForAReplyThatHitItsLimitIsCaught() async {
+        let violations = await engineContractViolations(
+            of: StubEngine(name: "a", namesAStopTokenAtTheLimit: true), model: model, prompt: "hi")
+
+        #expect(violations == ["The completion names a stop token but its reason is not .stop."])
+    }
+
+    @Test
     func anEngineThatCannotServeTheModelIsCaught() async {
         let violations = await engineContractViolations(of: StubEngine(name: "b"), model: model, prompt: "hi")
 
