@@ -17,10 +17,17 @@ public func engineContractViolations(
     }
 
     check(await engine.canServe(model), "canServe refuses the model.")
+    let loaded: any LoadedModel
     do {
         check(try await engine.loadBytes(model) > 0, "loadBytes is not positive.")
-        let loaded = try await engine.open(model)
+        loaded = try await engine.open(model)
+    } catch {
+        return violations + ["Threw \(error)."]
+    }
 
+    // Set once the prompt has tokenized, for the check after `close`.
+    var request: EngineRequest?
+    do {
         let tokens = try await loaded.tokenize(prompt)
         check(!tokens.isEmpty, "tokenize returns no tokens for the prompt.")
         let roundTrip = try await loaded.detokenize(tokens)
@@ -28,8 +35,9 @@ public func engineContractViolations(
 
         // A limited greedy request: tokens, then one completion, last.
         let limit = 2
-        let request = EngineRequest(promptTokens: tokens, maxTokens: limit, temperature: 0)
-        let first = try await events(of: loaded.generate(request))
+        let limited = EngineRequest(promptTokens: tokens, maxTokens: limit, temperature: 0)
+        request = limited
+        let first = try await events(of: loaded.generate(limited))
         var generated: [Int] = []
         var completions: [EngineCompletion] = []
         for event in first {
@@ -57,7 +65,7 @@ public func engineContractViolations(
         }
 
         // Greedy generation repeats.
-        let second = try await events(of: loaded.generate(request))
+        let second = try await events(of: loaded.generate(limited))
         check(tokenIDs(second) == generated, "Two temperature-0 requests differ.")
 
         // A consumer that goes away cancels its request and leaves the model usable.
@@ -67,18 +75,21 @@ public func engineContractViolations(
             }
         }
         _ = try? await consumer.value
-        let afterCancel = try await events(of: loaded.generate(request))
+        let afterCancel = try await events(of: loaded.generate(limited))
         check(tokenIDs(afterCancel) == generated, "The request after a cancelled one differs.")
 
         let memory = await loaded.memory()
         check(memory.active >= 0 && memory.cache >= 0, "memory reports negative bytes.")
         check(memory.peak >= memory.active, "memory.peak is below memory.active.")
-
-        await loaded.close()
-        let afterClose = try? await events(of: loaded.generate(request))
-        check(afterClose == nil, "generate on a closed model does not throw.")
     } catch {
         violations.append("Threw \(error).")
+    }
+
+    // The model is closed however the checks above ended.
+    await loaded.close()
+    if let request {
+        let afterClose = try? await events(of: loaded.generate(request))
+        check(afterClose == nil, "generate on a closed model does not throw.")
     }
     return violations
 }
