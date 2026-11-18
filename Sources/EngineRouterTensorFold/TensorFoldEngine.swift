@@ -60,7 +60,8 @@ struct ModelHandle: @unchecked Sendable {
 
 final class TensorFoldModel: LoadedModel {
     private struct State {
-        var isClosed = false
+        /// Set by the first `close`; every later `close` waits for the same one.
+        var closing: Task<Void, Never>?
         var nextID: UInt64 = 1
     }
 
@@ -78,7 +79,7 @@ final class TensorFoldModel: LoadedModel {
     /// Runs `body` with the handle, unless the model is closed.
     private func withHandle<T>(_ body: (UnsafeMutableRawPointer) throws -> T) throws -> T {
         try state.withLock { state in
-            guard !state.isClosed else { throw TensorFoldError.closed }
+            guard state.closing == nil else { throw TensorFoldError.closed }
             return try body(handle.pointer)
         }
     }
@@ -102,7 +103,9 @@ final class TensorFoldModel: LoadedModel {
             guard length >= 0 else { throw TensorFoldError.invalidText }
             var text = [CChar](repeating: 0, count: Int(length) + 1)
             _ = library.detokenize(pointer, ids, Int32(ids.count), &text, Int32(text.count))
-            return string(fromUTF8: text)
+            // The text can hold NUL characters, so its length is the one the
+            // library reported, not where the first NUL is.
+            return String(decoding: text.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
         }
     }
 
@@ -110,13 +113,26 @@ final class TensorFoldModel: LoadedModel {
     /// token. Requests to one model run together in the engine's lanes.
     func generate(_ request: EngineRequest) -> AsyncThrowingStream<EngineEvent, any Error> {
         let (stream, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
+        if let limit = request.maxTokens, limit <= 0 {
+            // A limit of no tokens ends the request before the engine sees it:
+            // the library reads 0 as "no limit", which is what `nil` asks for.
+            if state.withLock({ $0.closing == nil }) {
+                continuation.yield(.finished(EngineCompletion(
+                    reason: .length, promptTokenCount: 0, generatedTokenCount: 0, promptTime: 0, generationTime: 0)))
+                continuation.finish()
+            } else {
+                continuation.finish(throwing: TensorFoldError.closed)
+            }
+            return stream
+        }
         let prompt = request.promptTokens.map { Int32(clamping: $0) }
+        // 0 leaves the limit to the engine.
         let maxTokens = Int32(clamping: request.maxTokens ?? 0)
         // The library's final callback releases this reference.
         let context = Unmanaged.passRetained(Request(continuation: continuation))
 
         let submitted: Result<UInt64, TensorFoldError> = state.withLock { state in
-            guard !state.isClosed else { return .failure(.closed) }
+            guard state.closing == nil else { return .failure(.closed) }
             let id = state.nextID
             state.nextID += 1
             // A negative value leaves the setting to the engine.
@@ -158,13 +174,17 @@ final class TensorFoldModel: LoadedModel {
     func trim(toFree bytes: Int) async -> Int { 0 }
 
     func close() async {
-        let wasOpen = state.withLock { state in
-            defer { state.isClosed = true }
-            return !state.isClosed
+        let closing = state.withLock { state in
+            if let closing = state.closing { return closing }
+            let closing = Task<Void, Never> { [library, handle] in
+                // Cancels every request, delivers each one's final callback, and frees the model.
+                _ = try? await library.onQueue { library.close(handle.pointer) }
+            }
+            state.closing = closing
+            return closing
         }
-        guard wasOpen else { return }
-        // Cancels every request, delivers each one's final callback, and frees the model.
-        try? await library.onQueue { [library, handle] in library.close(handle.pointer) }
+        // Every caller returns only once the model has let go.
+        await closing.value
     }
 }
 

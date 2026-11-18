@@ -70,6 +70,22 @@ final class TensorFoldLibrary: @unchecked Sendable {
         memory = try symbol("pico_tf_memory")
     }
 
+    /// The entry points themselves, for tests that have no library file.
+    init(
+        canServe: CanServe, loadBytes: LoadBytes, open: Open, close: Close, tokenize: Tokenize,
+        detokenize: Detokenize, submit: Submit, cancel: Cancel, memory: Memory
+    ) {
+        self.canServe = canServe
+        self.loadBytes = loadBytes
+        self.open = open
+        self.close = close
+        self.tokenize = tokenize
+        self.detokenize = detokenize
+        self.submit = submit
+        self.cancel = cancel
+        self.memory = memory
+    }
+
     /// Runs a blocking library call on ``queue``.
     func onQueue<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in

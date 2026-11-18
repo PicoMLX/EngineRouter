@@ -1,6 +1,8 @@
 #if os(macOS)
+import Dispatch
 import EngineRouter
 import Foundation
+import Synchronization
 import Testing
 @testable import EngineRouterTensorFold
 
@@ -15,6 +17,79 @@ struct TensorFoldEngineTests {
             guard case TensorFoldError.library = error else { return false }
             return true
         }
+    }
+}
+
+/// A model over entry points that stand in for the library. C function
+/// pointers capture nothing, so what they record lives in `FakeLibrary`.
+@Suite(.serialized)
+struct TensorFoldModelTests {
+    private enum FakeLibrary {
+        static let submits = Mutex(0)
+        static let closeMayFinish = DispatchSemaphore(value: 0)
+        /// What the fake detokenizer writes: text with a NUL character inside it.
+        static let text: [UInt8] = Array("a\u{0}b".utf8)
+    }
+
+    private func model(close: @escaping TensorFoldLibrary.Close = { _ in }) -> TensorFoldModel {
+        let library = TensorFoldLibrary(
+            canServe: { _ in 1 }, loadBytes: { _ in 1 }, open: { _, _, _ in nil }, close: close,
+            tokenize: { _, _, _, _ in 0 },
+            detokenize: { _, _, _, out, capacity in
+                let text = FakeLibrary.text
+                if let out, capacity > 0 {
+                    let written = min(text.count, Int(capacity) - 1)
+                    for index in 0..<written { out[index] = CChar(bitPattern: text[index]) }
+                    out[written] = 0
+                }
+                return Int32(text.count)
+            },
+            submit: { _, _, _, _, _, _, _, _, _ in
+                FakeLibrary.submits.withLock { $0 += 1 }
+                return 1
+            },
+            cancel: { _, _ in }, memory: { _, _ in 1 })
+        return TensorFoldModel(library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!))
+    }
+
+    @Test
+    func detokenizedTextKeepsANULCharacterAndWhatFollowsIt() async throws {
+        #expect(try await model().detokenize([1, 2, 3]) == "a\u{0}b")
+    }
+
+    @Test
+    func aLimitOfNoTokensFinishesWithoutReachingTheEngine() async throws {
+        FakeLibrary.submits.withLock { $0 = 0 }
+        var events: [EngineEvent] = []
+        for try await event in model().generate(EngineRequest(promptTokens: [1, 2], maxTokens: 0)) {
+            events.append(event)
+        }
+
+        #expect(events == [
+            .finished(EngineCompletion(
+                reason: .length, promptTokenCount: 0, generatedTokenCount: 0, promptTime: 0, generationTime: 0))
+        ])
+        #expect(FakeLibrary.submits.withLock { $0 } == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func everyCloseReturnsOnlyOnceTheModelHasLetGo() async throws {
+        let model = model(close: { _ in FakeLibrary.closeMayFinish.wait() })
+        let first = Task { await model.close() }
+        // The second close starts once the first has marked the model closed.
+        while (try? await model.tokenize("x")) != nil { await Task.yield() }
+        let secondReturned = Mutex(false)
+        let second = Task {
+            await model.close()
+            secondReturned.withLock { $0 = true }
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!secondReturned.withLock { $0 }, "The library is still closing the model.")
+        FakeLibrary.closeMayFinish.signal()
+        await first.value
+        await second.value
+        #expect(secondReturned.withLock { $0 })
     }
 }
 
