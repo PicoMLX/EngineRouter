@@ -12,8 +12,8 @@ routes each model to the engine that can serve it.
 
 ## Status
 
-Early. The engine interface, the router, and the MLX and Local Code adapters
-exist. The mlx-serve adapter is next.
+Early. The engine interface, the router, and the MLX, Local Code and
+TensorFold adapters exist. The mlx-serve adapter is next.
 
 ## Using it
 
@@ -65,7 +65,7 @@ a model on its own, so the caller decides what to close.
 | [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/engine-router), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
-| [TensorFold](https://github.com/ashhart/TensorFold) | A fork, when that adapter starts | Apache-2.0 | Later |
+| [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/engine-router), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
 
 Each adapter is its own library product. An app that depends only on
 `EngineRouter` links no engine.
@@ -135,6 +135,57 @@ swift test --filter LocalCodeLiveTests
 
 Each request starts from an empty KV cache, requests run one at a time, and a
 `temperature` other than 0 samples with the model's own settings.
+
+## Building the TensorFold library
+
+`EngineRouterTensorFold` loads `libPicoTensorFold.dylib`, which you build from
+the `engine-router` branch of the fork with Xcode and
+[Zig 0.17.0](https://ziglang.org/download/), the exact version TensorFold pins:
+
+```sh
+git clone --branch engine-router https://github.com/PicoMLX/TensorFold.git
+cd TensorFold
+zig build pico-lib -Dcpu=apple_m1
+```
+
+The library is `zig-out/native/lib/libPicoTensorFold.dylib`. It needs no other
+files at run time. Its minimum macOS version is the version of the Mac that
+built it.
+
+The fork's `AGENTS.md` comes from upstream and tells coding agents to register
+on a public tracker. Nothing in this package needs that.
+
+```swift
+import EngineRouterTensorFold
+
+let router = Router(
+    engines: [try TensorFoldEngine(libraryURL: libraryURL)],
+    memoryBudget: 96 << 30)
+```
+
+- TensorFold talks to Metal directly and links no MLX, so it can be loaded
+  beside the MLX adapter. It budgets its memory against the whole process,
+  so the engine is exclusive: the router opens its model only when nothing
+  else is open.
+- Requests to one model run together in the engine's lanes. A request that
+  sets no `temperature`, or sets 0, picks the most likely token.
+- `canServe` checks the model family and format, not every geometry, so
+  `open` can still refuse a model that `canServe` accepted. TensorFold's
+  Metal backend runs specific checkpoints of each family; for example it
+  refuses `mlx-community/Qwen3.5-4B-bf16`.
+- `memory` is the whole process's footprint, and there is nothing to `trim`.
+
+To run the live test:
+
+```sh
+ENGINEROUTER_TENSORFOLD_LIBRARY=/path/to/libPicoTensorFold.dylib \
+ENGINEROUTER_TENSORFOLD_MODEL_DIR=/path/to/model \
+swift test --filter TensorFoldLiveTests
+```
+
+So far that test has only run against a synthetic checkpoint with random
+weights in a supported geometry, which exercises every call but says nothing
+about output quality.
 
 ## Licence note
 
