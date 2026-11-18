@@ -85,14 +85,14 @@ final class TensorFoldModel: LoadedModel {
     }
 
     func tokenize(_ text: String) async throws -> [Int] {
-        try withHandle { pointer in
-            try text.withCString { string in
-                let count = library.tokenize(pointer, string, nil, 0)
-                guard count >= 0 else { throw TensorFoldError.invalidText }
-                var tokens = [Int32](repeating: 0, count: Int(count))
-                _ = library.tokenize(pointer, string, &tokens, count)
-                return tokens.map(Int.init)
-            }
+        // Passed with its length, so a NUL character in the text is kept.
+        let bytes = Array(text.utf8)
+        return try withHandle { pointer in
+            let count = library.tokenize(pointer, bytes, Int32(bytes.count), nil, 0)
+            guard count >= 0 else { throw TensorFoldError.invalidText }
+            var tokens = [Int32](repeating: 0, count: Int(count))
+            _ = library.tokenize(pointer, bytes, Int32(bytes.count), &tokens, count)
+            return tokens.map(Int.init)
         }
     }
 

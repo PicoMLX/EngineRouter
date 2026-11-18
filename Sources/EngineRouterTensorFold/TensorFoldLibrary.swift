@@ -18,8 +18,9 @@ final class TensorFoldLibrary: @unchecked Sendable {
     typealias LoadBytes = @convention(c) (UnsafePointer<CChar>?) -> Int64
     typealias Open = @convention(c) (UnsafePointer<CChar>?, UnsafeMutablePointer<CChar>?, Int32) -> UnsafeMutableRawPointer?
     typealias Close = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    /// The text is UTF-8 bytes with a length, so it can hold NUL characters.
     typealias Tokenize = @convention(c) (
-        UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafeMutablePointer<Int32>?, Int32
+        UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int32, UnsafeMutablePointer<Int32>?, Int32
     ) -> Int32
     typealias Detokenize = @convention(c) (
         UnsafeMutableRawPointer?, UnsafePointer<Int32>?, Int32, UnsafeMutablePointer<CChar>?, Int32
@@ -30,6 +31,9 @@ final class TensorFoldLibrary: @unchecked Sendable {
     ) -> Int32
     typealias Cancel = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
     typealias Memory = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Int64>?) -> Int32
+
+    /// The version of the library's C interface this adapter is written against.
+    static let interfaceVersion: Int32 = 2
 
     /// Opening and closing a model block, so they run off Swift's cooperative executor.
     static let queue = DispatchQueue(label: "enginerouter.tensorfold", qos: .userInitiated)
@@ -58,6 +62,13 @@ final class TensorFoldLibrary: @unchecked Sendable {
                 throw TensorFoldError.library("The TensorFold library has no \(name). Rebuild it from the fork.")
             }
             return unsafeBitCast(address, to: T.self)
+        }
+        // An entry point that changes its arguments keeps its name, so the version is what tells them apart.
+        let version: @convention(c) () -> Int32 = try symbol("pico_tf_abi_version")
+        guard version() == Self.interfaceVersion else {
+            throw TensorFoldError.library(
+                "The TensorFold library has interface version \(version()); this adapter needs "
+                    + "\(Self.interfaceVersion). Rebuild it from the fork.")
         }
         canServe = try symbol("pico_tf_can_serve")
         loadBytes = try symbol("pico_tf_load_bytes")

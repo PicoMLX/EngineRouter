@@ -34,7 +34,13 @@ struct TensorFoldModelTests {
     private func model(close: @escaping TensorFoldLibrary.Close = { _ in }) -> TensorFoldModel {
         let library = TensorFoldLibrary(
             canServe: { _ in 1 }, loadBytes: { _ in 1 }, open: { _, _, _ in nil }, close: close,
-            tokenize: { _, _, _, _ in 0 },
+            // One token per byte of the text it is handed.
+            tokenize: { _, text, length, out, capacity in
+                if let text, let out {
+                    for index in 0..<Int(min(length, capacity)) { out[index] = Int32(text[index]) }
+                }
+                return length
+            },
             detokenize: { _, _, _, out, capacity in
                 let text = FakeLibrary.text
                 if let out, capacity > 0 {
@@ -50,6 +56,11 @@ struct TensorFoldModelTests {
             },
             cancel: { _, _ in }, memory: { _, _ in 1 })
         return TensorFoldModel(library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!))
+    }
+
+    @Test
+    func theWholeTextReachesTheTokenizerAcrossANULCharacter() async throws {
+        #expect(try await model().tokenize("a\u{0}b") == [97, 0, 98])
     }
 
     @Test
@@ -135,6 +146,9 @@ struct TensorFoldLiveTests {
         let marker = try await loaded.tokenize("<|im_start|>")
         #expect(marker.count == 1)
         let prompt = try await loaded.tokenize(Self.prompt)
+        // A NUL character is text like any other.
+        let withNUL = "a\u{0}b"
+        #expect(try await loaded.detokenize(try await loaded.tokenize(withNUL)) == withNUL)
 
         // Two requests at once both finish, and greedy generation gives both the same tokens.
         let request = EngineRequest(promptTokens: prompt, maxTokens: 8, temperature: 0)
