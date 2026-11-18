@@ -102,7 +102,8 @@ struct ModelFiles: Equatable {
 
 final class LocalCodeModel: LoadedModel {
     private struct State {
-        var isClosed = false
+        /// Set by the first `close`; every later `close` waits for the same one.
+        var closing: Task<Void, Never>?
         /// Whether a generation has started, which is when the weights load.
         var hasGenerated = false
         var requests: [ObjectIdentifier: Request] = [:]
@@ -123,13 +124,13 @@ final class LocalCodeModel: LoadedModel {
     // not wait behind a running generation.
 
     func tokenize(_ text: String) async throws -> [Int] {
-        try text.withCString { string in
-            let count = library.tokenize(string, nil, 0)
-            guard count >= 0 else { throw LocalCodeError.invalidText }
-            var tokens = [Int32](repeating: 0, count: Int(count))
-            _ = library.tokenize(string, &tokens, count)
-            return tokens.map(Int.init)
-        }
+        // Passed with its length, so a NUL character in the text is kept.
+        let bytes = Array(text.utf8)
+        let count = library.tokenize(bytes, Int32(bytes.count), nil, 0)
+        guard count >= 0 else { throw LocalCodeError.invalidText }
+        var tokens = [Int32](repeating: 0, count: Int(count))
+        _ = library.tokenize(bytes, Int32(bytes.count), &tokens, count)
+        return tokens.map(Int.init)
     }
 
     func detokenize(_ tokens: [Int]) async throws -> String {
@@ -137,16 +138,30 @@ final class LocalCodeModel: LoadedModel {
         let length = library.detokenize(ids, Int32(ids.count), nil, 0)
         var text = [CChar](repeating: 0, count: Int(length) + 1)
         _ = library.detokenize(ids, Int32(ids.count), &text, Int32(text.count))
-        return string(fromUTF8: text)
+        // The text can hold NUL characters, so its length is the one the
+        // library reported, not where the first NUL is.
+        return String(decoding: text.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
     /// `temperature` 0 picks the most likely token; any other value samples
     /// with the model's own settings. Local Code has no `topP`.
     func generate(_ request: EngineRequest) -> AsyncThrowingStream<EngineEvent, any Error> {
         let (stream, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
+        if let limit = request.maxTokens, limit <= 0 {
+            // A limit of no tokens ends the request before the library sees it:
+            // the library reads 0 as "no limit", which is what `nil` asks for.
+            if state.withLock({ $0.closing == nil }) {
+                continuation.yield(.finished(EngineCompletion(
+                    reason: .length, promptTokenCount: 0, generatedTokenCount: 0, promptTime: 0, generationTime: 0)))
+                continuation.finish()
+            } else {
+                continuation.finish(throwing: LocalCodeError.closed)
+            }
+            return stream
+        }
         let running = Request(continuation: continuation)
         let accepted = state.withLock { state in
-            guard !state.isClosed else { return false }
+            guard state.closing == nil else { return false }
             state.requests[ObjectIdentifier(running)] = running
             return true
         }
@@ -159,6 +174,7 @@ final class LocalCodeModel: LoadedModel {
         }
 
         let prompt = request.promptTokens.map { Int32(clamping: $0) }
+        // 0 leaves the limit to the library.
         let maxTokens = Int32(clamping: request.maxTokens ?? 0)
         let deterministic: Int32 = request.temperature == 0 ? 1 : 0
         LocalCodeLibrary.queue.async { [self] in
@@ -192,7 +208,7 @@ final class LocalCodeModel: LoadedModel {
     }
 
     func memory() async -> EngineMemory {
-        let active = state.withLock { $0.hasGenerated && !$0.isClosed } ? residentBytes : 0
+        let active = state.withLock { $0.hasGenerated && $0.closing == nil } ? residentBytes : 0
         return EngineMemory(active: active, cache: 0, peak: active)
     }
 
@@ -200,15 +216,18 @@ final class LocalCodeModel: LoadedModel {
     func trim(toFree bytes: Int) async -> Int { 0 }
 
     func close() async {
-        let running = state.withLock { state -> [Request]? in
-            guard !state.isClosed else { return nil }
-            state.isClosed = true
-            return Array(state.requests.values)
+        let closing = state.withLock { state in
+            if let closing = state.closing { return closing }
+            for request in state.requests.values { request.cancel() }
+            let closing = Task<Void, Never> { [library, handle] in
+                // Queued behind the requests just cancelled, so none is still inside the library.
+                _ = try? await library.onQueue { library.close(handle.pointer) }
+            }
+            state.closing = closing
+            return closing
         }
-        guard let running else { return }
-        for request in running { request.cancel() }
-        // Queued behind the requests just cancelled, so none is still inside the library.
-        try? await library.onQueue { [library, handle] in library.close(handle.pointer) }
+        // Every caller returns only once the model has let go.
+        await closing.value
     }
 }
 

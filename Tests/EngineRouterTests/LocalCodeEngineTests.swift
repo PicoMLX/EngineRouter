@@ -1,6 +1,8 @@
 #if os(macOS)
+import Dispatch
 import EngineRouter
 import Foundation
+import Synchronization
 import Testing
 @testable import EngineRouterLocalCode
 
@@ -63,6 +65,98 @@ struct LocalCodeModelFilesTests {
     }
 }
 
+/// A model over entry points that stand in for the library. C function
+/// pointers capture nothing, so what they record lives in `FakeLibrary`.
+@Suite(.serialized)
+struct LocalCodeModelTests {
+    private enum FakeLibrary {
+        static let generations = Mutex(0)
+        static let closeStarted = DispatchSemaphore(value: 0)
+        static let closeMayFinish = DispatchSemaphore(value: 0)
+        /// What the fake detokenizer writes: text with a NUL character inside it.
+        static let text: [UInt8] = Array("a\u{0}b".utf8)
+    }
+
+    private func model(close: @escaping LocalCodeLibrary.Close = { _ in }) -> LocalCodeModel {
+        let library = LocalCodeLibrary(
+            open: { _, _, _, _, _ in nil }, close: close, residentBytes: { _ in 1 },
+            // One token per byte of the text it is handed.
+            tokenize: { text, length, out, capacity in
+                if let text, let out {
+                    for index in 0..<Int(min(length, capacity)) { out[index] = Int32(text[index]) }
+                }
+                return length
+            },
+            detokenize: { _, _, out, capacity in
+                let text = FakeLibrary.text
+                if let out, capacity > 0 {
+                    let written = min(text.count, Int(capacity) - 1)
+                    for index in 0..<written { out[index] = CChar(bitPattern: text[index]) }
+                    out[written] = 0
+                }
+                return Int32(text.count)
+            },
+            generateTokens: { _, _, _, _, _, _, _, _ in
+                FakeLibrary.generations.withLock { $0 += 1 }
+                return 0
+            })
+        return LocalCodeModel(
+            library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!), residentBytes: 1)
+    }
+
+    @Test
+    func theWholeTextReachesTheTokenizerAcrossANULCharacter() async throws {
+        #expect(try await model().tokenize("a\u{0}b") == [97, 0, 98])
+    }
+
+    @Test
+    func detokenizedTextKeepsANULCharacterAndWhatFollowsIt() async throws {
+        #expect(try await model().detokenize([1, 2, 3]) == "a\u{0}b")
+    }
+
+    @Test
+    func aLimitOfNoTokensFinishesWithoutReachingTheLibrary() async throws {
+        FakeLibrary.generations.withLock { $0 = 0 }
+        var events: [EngineEvent] = []
+        for try await event in model().generate(EngineRequest(promptTokens: [1, 2], maxTokens: 0)) {
+            events.append(event)
+        }
+
+        #expect(events == [
+            .finished(EngineCompletion(
+                reason: .length, promptTokenCount: 0, generatedTokenCount: 0, promptTime: 0, generationTime: 0))
+        ])
+        #expect(FakeLibrary.generations.withLock { $0 } == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func everyCloseReturnsOnlyOnceTheModelHasLetGo() async throws {
+        let model = model(close: { _ in
+            FakeLibrary.closeStarted.signal()
+            FakeLibrary.closeMayFinish.wait()
+        })
+        let first = Task { await model.close() }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                FakeLibrary.closeStarted.wait()
+                continuation.resume()
+            }
+        }
+        let secondReturned = Mutex(false)
+        let second = Task {
+            await model.close()
+            secondReturned.withLock { $0 = true }
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!secondReturned.withLock { $0 }, "The library is still closing the model.")
+        FakeLibrary.closeMayFinish.signal()
+        await first.value
+        await second.value
+        #expect(secondReturned.withLock { $0 })
+    }
+}
+
 private enum LiveLocalCode {
     static var library: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_LOCAL_CODE_LIBRARY"] }
     static var modelDirectory: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_LOCAL_CODE_MODEL_DIR"] }
@@ -98,6 +192,9 @@ struct LocalCodeLiveTests {
         #expect(try await loaded.detokenize(try await loaded.tokenize(Self.question)) == Self.question)
         let accented = "Crème brûlée, 日本語, 🙂"
         #expect(try await loaded.detokenize(try await loaded.tokenize(accented)) == accented)
+        // A NUL character is text like any other.
+        let withNUL = "a\u{0}b"
+        #expect(try await loaded.detokenize(try await loaded.tokenize(withNUL)) == withNUL)
 
         // A greedy request runs to the model's stop token.
         let (tokens, completion) = try await run(
