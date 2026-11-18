@@ -16,6 +16,12 @@ let package = Package(
             name: "EngineRouter",
             targets: ["EngineRouter"]
         ),
+        // macOS only. Loads a Local Code library you build yourself; see the
+        // licence note in the README.
+        .library(
+            name: "EngineRouterLocalCode",
+            targets: ["EngineRouterLocalCode"]
+        ),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -26,9 +32,16 @@ let package = Package(
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
         ),
+        .target(
+            name: "EngineRouterLocalCode",
+            dependencies: ["EngineRouter"],
+            swiftSettings: [
+                .enableUpcomingFeature("ApproachableConcurrency"),
+            ],
+        ),
         .testTarget(
             name: "EngineRouterTests",
-            dependencies: ["EngineRouter"],
+            dependencies: ["EngineRouter", "EngineRouterLocalCode"],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
