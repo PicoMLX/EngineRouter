@@ -183,7 +183,7 @@ private enum LiveLocalCode {
 ///
 ///     ENGINEROUTER_LOCAL_CODE_LIBRARY=/path/to/PicoLocalCodeNative.dylib \
 ///     ENGINEROUTER_LOCAL_CODE_MODEL_DIR=/path/to/deepseek swift test
-@Suite(.enabled(if: LiveLocalCode.library != nil && LiveLocalCode.modelDirectory != nil))
+@Suite(.enabled(if: LiveLocalCode.library != nil && LiveLocalCode.modelDirectory != nil), .serialized)
 struct LocalCodeLiveTests {
 
     private static let question = "Reply in one short sentence: What is 7 plus 5?"
@@ -251,6 +251,15 @@ struct LocalCodeLiveTests {
         await #expect(throws: LocalCodeError.closed) {
             for try await _ in loaded.generate(EngineRequest(promptTokens: prompt)) {}
         }
+    }
+
+    @Test(.timeLimit(.minutes(30)))
+    func localCodeMeetsTheEngineContract() async throws {
+        let engine = try LocalCodeEngine(libraryURL: URL(fileURLWithPath: try #require(LiveLocalCode.library)))
+        let model = EngineModel(
+            id: "deepseek-4.1-flash", directory: URL(fileURLWithPath: try #require(LiveLocalCode.modelDirectory)))
+
+        #expect(await engineContractViolations(of: engine, model: model, prompt: Self.question) == [])
     }
 
     private func run(

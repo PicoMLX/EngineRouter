@@ -15,6 +15,11 @@ struct StubEngine: InferenceEngine {
     var stallsAfterFirstToken = false
     /// When set, `close` waits here before the model lets go.
     var closeGate: Gate?
+    /// Faults for the contract tests to catch.
+    var ignoresMaxTokens = false
+    var servesAfterClose = false
+    var failsToTokenize = false
+    var namesAStopTokenAtTheLimit = false
     let log = Log()
 
     func canServe(_ model: EngineModel) async -> Bool { model.id.hasPrefix(name) }
@@ -87,13 +92,23 @@ struct StubEngine: InferenceEngine {
     }
 }
 
-enum StubError: Error { case cannotOpen }
+enum StubError: Error { case cannotOpen, cannotTokenize, closed }
 
-struct StubModel: LoadedModel {
+final class StubModel: LoadedModel {
     let engine: StubEngine
     let id: String
+    /// This instance's own state: the same ID can be opened again after a close.
+    private let isClosed = Mutex(false)
 
-    func tokenize(_ text: String) async throws -> [Int] { text.utf8.map(Int.init) }
+    init(engine: StubEngine, id: String) {
+        self.engine = engine
+        self.id = id
+    }
+
+    func tokenize(_ text: String) async throws -> [Int] {
+        if engine.failsToTokenize { throw StubError.cannotTokenize }
+        return text.utf8.map(Int.init)
+    }
 
     func detokenize(_ tokens: [Int]) async throws -> String {
         String(decoding: tokens.map(UInt8.init), as: UTF8.self)
@@ -101,7 +116,11 @@ struct StubModel: LoadedModel {
 
     func generate(_ request: EngineRequest) -> AsyncThrowingStream<EngineEvent, any Error> {
         let (stream, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
-        let produced = Array(engine.tokens.prefix(request.maxTokens ?? .max))
+        if isClosed.withLock({ $0 }), !engine.servesAfterClose {
+            continuation.finish(throwing: StubError.closed)
+            return stream
+        }
+        let produced = Array(engine.tokens.prefix(engine.ignoresMaxTokens ? .max : request.maxTokens ?? .max))
         let stalls = engine.stallsAfterFirstToken
         let log = engine.log
         let task = Task {
@@ -113,10 +132,12 @@ struct StubModel: LoadedModel {
                     return
                 }
             }
+            let stopped = produced.count == engine.tokens.count
             continuation.yield(.finished(EngineCompletion(
-                reason: produced.count < engine.tokens.count ? .length : .stop,
+                reason: stopped ? .stop : .length,
                 promptTokenCount: request.promptTokens.count, generatedTokenCount: produced.count,
-                promptTime: 0, generationTime: 0)))
+                promptTime: 0, generationTime: 0,
+                stopToken: stopped || engine.namesAStopTokenAtTheLimit ? 0 : nil)))
             continuation.finish()
         }
         continuation.onTermination = { termination in
@@ -141,6 +162,7 @@ struct StubModel: LoadedModel {
     func close() async {
         engine.log.closeStarted()
         await engine.closeGate?.wait()
+        isClosed.withLock { $0 = true }
         engine.log.close(id)
     }
 }
