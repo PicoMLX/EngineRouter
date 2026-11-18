@@ -46,7 +46,10 @@ func weightBytes(in directory: URL) -> Int? {
     guard files.contains(where: { $0.lastPathComponent == "config.json" }) else { return nil }
     let weights = files.filter { $0.pathExtension == "safetensors" }
     guard !weights.isEmpty else { return nil }
-    return weights.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    // A weight file can be a link, as in the Hugging Face cache; its size is its target's.
+    return weights.reduce(0) {
+        $0 + ((try? $1.resolvingSymlinksInPath().resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    }
 }
 
 public enum MLXEngineError: Error, Equatable, CustomStringConvertible {
