@@ -12,8 +12,8 @@ routes each model to the engine that can serve it.
 
 ## Status
 
-Early. The engine interface, the router, and the MLX, Local Code and
-TensorFold adapters exist. The mlx-serve adapter is next.
+Early. The engine interface, the router, and the MLX, Local Code, TensorFold
+and mlx-serve adapters exist.
 
 ## Using it
 
@@ -63,8 +63,8 @@ a model on its own, so the caller decides what to close.
 |---|---|---|---|
 | [mlx-swift-lm](https://github.com/PicoMLX/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | `EngineRouterMLX`, text only, one request at a time per call; see below |
 | [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/pico/native-bridge), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
-| [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
-| [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
+| [mlx-serve](https://github.com/ddalcu/mlx-serve) | [Our fork](https://github.com/PicoMLX/mlx-serve/tree/pico/native-bridge), built locally into a dynamic library with its own copy of MLX | MIT | `EngineRouterMLXServe`, macOS 26.2 or later, text only; see below |
+| [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | In the mlx-serve library, not yet run with an EXL3 model |
 | [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/pico/native-bridge), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
 
 Each adapter is its own library product. An app that depends only on
@@ -186,6 +186,63 @@ swift test --filter TensorFoldLiveTests
 So far that test has only run against a synthetic checkpoint with random
 weights in a supported geometry, which exercises every call but says nothing
 about output quality.
+
+## Building the mlx-serve library
+
+`EngineRouterMLXServe` loads `libPicoMlxServe.dylib`, which you build from the
+`pico/native-bridge` branch of the fork with Xcode,
+[Zig 0.17.0](https://ziglang.org/download/) and CMake:
+
+```sh
+git clone --branch pico/native-bridge https://github.com/PicoMLX/mlx-serve.git
+cd mlx-serve
+git submodule update --init --depth 1 lib/mlx-src lib/mlxc-src
+./scripts/build-mlx-static.sh
+zig build pico-lib -Dpico-only -Doptimize=ReleaseFast
+```
+
+The library is `zig-out/lib/libPicoMlxServe.dylib`, and `mlx.metallib` has to
+stay beside it. It requires macOS 26.2.
+
+```swift
+import EngineRouterMLXServe
+
+let router = Router(
+    engines: [try MLXServeEngine(libraryURL: libraryURL)],
+    memoryBudget: 96 << 30)
+```
+
+- The library carries its own copy of MLX, linked statically with every
+  symbol hidden, so it runs in a process that also uses Swift MLX. Each copy
+  keeps its own memory accounting.
+- It opens one model per process and does its own memory admission, so the
+  engine is exclusive. While a model is open, its copy of MLX has a wired
+  limit of the machine's recommended working set and a buffer cache limit of
+  8 GB.
+- Only the MLX engine is in the library: no llama.cpp, ds4, Neural Engine,
+  images or outside plugins. The chat template is not loaded, as the app
+  renders prompts.
+- For bf16 weights mlx-serve decodes with 8-bit copies of the attention
+  projections, so its tokens can differ from another engine's for the same
+  model.
+- Requests to one model run together in the engine's scheduler, and it keeps
+  prompt prefixes, so a repeated prompt reports cached prompt tokens. `trim`
+  drops those prefixes and its buffer pool.
+- mlx-serve ends the process if its inference thread is stuck for 30 seconds
+  while a model closes.
+
+To run the live tests:
+
+```sh
+ENGINEROUTER_MLXSERVE_LIBRARY=/path/to/libPicoMlxServe.dylib \
+ENGINEROUTER_MLXSERVE_MODEL_DIR=/path/to/model \
+swift test --filter MLXServeLiveTests
+```
+
+`MLXCoexistenceTests` runs this engine and the Swift MLX engine on one model
+at the same time. It uses Swift MLX, so it runs with `xcodebuild` and takes
+`TEST_RUNNER_ENGINEROUTER_MLXSERVE_LIBRARY` and
+`TEST_RUNNER_ENGINEROUTER_MLX_MODEL_DIR`.
 
 ## Licence note
 

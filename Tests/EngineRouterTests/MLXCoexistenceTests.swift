@@ -2,6 +2,7 @@
 import Darwin
 import EngineRouter
 import EngineRouterMLX
+import EngineRouterMLXServe
 import Foundation
 import Synchronization
 import Testing
@@ -85,6 +86,39 @@ struct MLXCoexistenceTests {
         await loaded.close()
         // The library still works once Swift MLX's model is gone.
         #expect(abs(smoke(512, 8) - 512) < 1e-3)
+    }
+
+    /// The two engines, each with its own MLX, generate from the same model at
+    /// the same time, and each keeps repeating what it generates alone.
+    @Test(.timeLimit(.minutes(10)))
+    func mlxServeAndSwiftMLXGenerateAtTheSameTime() async throws {
+        let model = EngineModel(
+            id: "coexistence", directory: URL(fileURLWithPath: try #require(LiveCoexistence.modelDirectory)))
+        let swift = try await MLXEngine().open(model)
+        let serve = try await MLXServeEngine(
+            libraryURL: URL(fileURLWithPath: try #require(LiveCoexistence.library))
+        ).open(model)
+        let prompt = try await swift.tokenize("The capital of France is")
+        #expect(try await serve.tokenize("The capital of France is") == prompt)
+
+        let swiftAlone = try await tokens(swift, prompt, limit: 48)
+        let serveAlone = try await tokens(serve, prompt, limit: 48)
+        #expect(swiftAlone.count == 48)
+        #expect(serveAlone.count == 48)
+        print("Swift MLX: \(try await swift.detokenize(Array(swiftAlone.prefix(12))))")
+        print("mlx-serve: \(try await serve.detokenize(Array(serveAlone.prefix(12))))")
+
+        for _ in 0..<3 {
+            async let fromSwift = tokens(swift, prompt, limit: 48)
+            async let fromServe = tokens(serve, prompt, limit: 48)
+            let (one, two) = try await (fromSwift, fromServe)
+            #expect(one == swiftAlone)
+            #expect(two == serveAlone)
+        }
+
+        await serve.close()
+        #expect(try await tokens(swift, prompt, limit: 48) == swiftAlone)
+        await swift.close()
     }
 
     private func tokens(_ loaded: any LoadedModel, _ prompt: [Int], limit: Int) async throws -> [Int] {
