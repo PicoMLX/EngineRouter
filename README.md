@@ -12,8 +12,8 @@ routes each model to the engine that can serve it.
 
 ## Status
 
-Early. The engine interface, the router, and the MLX, Local Code, TensorFold
-and mlx-serve adapters exist.
+Early. The engine interface, the router, and the MLX, Local Code, TensorFold,
+mlx-serve and vmlx adapters exist.
 
 ## Using it
 
@@ -66,6 +66,7 @@ a model on its own, so the caller decides what to close.
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | [Our fork](https://github.com/PicoMLX/mlx-serve/tree/engine-router), built locally into a dynamic library with its own copy of MLX | MIT | `EngineRouterMLXServe`, macOS 26.2 or later, text only; see below |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | In the mlx-serve library, not yet run with an EXL3 model |
 | [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/engine-router), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
+| [Osaurus](https://github.com/osaurus-ai/osaurus)'s engine, [vmlx-swift](https://github.com/osaurus-ai/vmlx-swift) | [Our fork](https://github.com/PicoMLX/vmlx-swift/tree/engine-router), built into a helper process | MIT | `EngineRouterVMLX`, macOS only, text only, out of process; see below |
 
 Each adapter is its own library product. An app that depends only on
 `EngineRouter` links no engine.
@@ -243,6 +244,62 @@ swift test --filter MLXServeLiveTests
 at the same time. It uses Swift MLX, so it runs with `xcodebuild` and takes
 `TEST_RUNNER_ENGINEROUTER_MLXSERVE_LIBRARY` and
 `TEST_RUNNER_ENGINEROUTER_MLX_MODEL_DIR`.
+
+## Running Osaurus's engine
+
+The Osaurus app's engine is a separate library,
+[vmlx-swift](https://github.com/osaurus-ai/vmlx-swift): batching across
+requests, a prompt-prefix cache and its own model formats on its own fork of
+MLX. It ships modules with the same names as the MLX libraries this package
+links (`MLX`, `MLXLLM`, `MLXLMCommon` and others), so the two cannot be built
+into one process. `EngineRouterVMLX` therefore runs it in a helper process and
+talks to it over the helper's standard input and output.
+
+The helper is its own package, in `Helpers/VMLX`, and depends on the
+`engine-router` branch of our fork. Build it with Xcode's build system, which
+also builds MLX's Metal library:
+
+```sh
+cd Helpers/VMLX
+xcodebuild build -scheme enginerouter-vmlx-helper -configuration Release \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/xcode \
+  -skipMacroValidation -skipPackagePluginValidation
+```
+
+The executable is `.build/xcode/Build/Products/Release/enginerouter-vmlx-helper`.
+`mlx-swift_Cmlx.bundle` from the same folder has to stay beside it.
+
+```swift
+import EngineRouterVMLX
+
+let router = Router(
+    engines: [try await VMLXEngine(helperURL: helperURL)],
+    memoryBudget: 96 << 30)
+```
+
+- The helper starts with the engine and exits when the engine and its models
+  are released. If it dies, every request fails and the engine cannot be used
+  again; nothing restarts it.
+- **Starting a process is not allowed inside the App Store sandbox.** A
+  sandboxed app has to run the helper as an XPC service in its bundle; that
+  wrapper is not written yet. The messages are the same either way.
+- A model's weights are in the helper's memory, not the app's. `memory`
+  reports the helper's MLX figures, which all models open in it share, and
+  `loadBytes` is the size of the weight files.
+- Requests to one model run together in vmlx-swift's batch engine. Its
+  in-memory prompt-prefix cache is on, so a repeated prompt reports cached
+  prompt tokens; its disk cache is off.
+- A request that sets no `temperature` or `topP` uses the model's
+  `generation_config.json`, or vmlx-swift's defaults when it has none.
+- Only text models are served.
+
+To run the live tests:
+
+```sh
+ENGINEROUTER_VMLX_HELPER=/path/to/enginerouter-vmlx-helper \
+ENGINEROUTER_VMLX_MODEL_DIR=/path/to/model \
+swift test --filter VMLXLiveTests
+```
 
 ## Licence note
 
