@@ -27,6 +27,11 @@ let package = Package(
             name: "EngineRouterTensorFold",
             targets: ["EngineRouterTensorFold"]
         ),
+        // macOS only. Loads an mlx-serve library you build from the fork.
+        .library(
+            name: "EngineRouterMLXServe",
+            targets: ["EngineRouterMLXServe"]
+        ),
         // MLX models, run with mlx-swift-lm.
         .library(
             name: "EngineRouterMLX",
@@ -67,6 +72,13 @@ let package = Package(
             ],
         ),
         .target(
+            name: "EngineRouterMLXServe",
+            dependencies: ["EngineRouter"],
+            swiftSettings: [
+                .enableUpcomingFeature("ApproachableConcurrency"),
+            ],
+        ),
+        .target(
             name: "EngineRouterMLX",
             dependencies: [
                 "EngineRouter",
@@ -82,7 +94,10 @@ let package = Package(
         ),
         .testTarget(
             name: "EngineRouterTests",
-            dependencies: ["EngineRouter", "EngineRouterLocalCode", "EngineRouterMLX", "EngineRouterTensorFold"],
+            dependencies: [
+                "EngineRouter", "EngineRouterLocalCode", "EngineRouterMLX", "EngineRouterMLXServe",
+                "EngineRouterTensorFold",
+            ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
