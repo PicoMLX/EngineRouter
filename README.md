@@ -70,7 +70,7 @@ a model on its own, so the caller decides what to close.
 >>>>>>> claude/phase-3-engine-contract
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
-| [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/pico/native-bridge), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
+| [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/engine-router), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
 
 Each adapter is its own library product. An app that depends only on
 `EngineRouter` links no engine.
@@ -144,11 +144,11 @@ Each request starts from an empty KV cache, requests run one at a time, and a
 ## Building the TensorFold library
 
 `EngineRouterTensorFold` loads `libPicoTensorFold.dylib`, which you build from
-the `pico/native-bridge` branch of the fork with Xcode and
+the `engine-router` branch of the fork with Xcode and
 [Zig 0.17.0](https://ziglang.org/download/), the exact version TensorFold pins:
 
 ```sh
-git clone --branch pico/native-bridge https://github.com/PicoMLX/TensorFold.git
+git clone --branch engine-router https://github.com/PicoMLX/TensorFold.git
 cd TensorFold
 zig build pico-lib -Dcpu=apple_m1
 ```
