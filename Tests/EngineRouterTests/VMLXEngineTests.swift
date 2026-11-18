@@ -215,6 +215,48 @@ struct VMLXEngineTests {
         await #expect(throws: VMLXError.helperExited) { try await loaded.tokenize("x") }
     }
 
+    /// A request sent after the helper has stopped reading fails; it does not
+    /// end the app with SIGPIPE.
+    @Test(.timeLimit(.minutes(1)))
+    func writingToAHelperThatStoppedReadingThrows() async throws {
+        let toHelper = Pipe()
+        let fromHelper = Pipe()
+        try toHelper.fileHandleForReading.close()
+        let connection = HelperConnection(
+            toHelper: toHelper.fileHandleForWriting, fromHelper: fromHelper.fileHandleForReading)
+
+        await #expect(throws: VMLXError.helperExited) { try await connection.call("hello") }
+        try fromHelper.fileHandleForWriting.close()
+    }
+
+    /// A stream returned from a scope that released its engine and model still
+    /// runs to its end: the generation keeps the helper alive.
+    @Test(.timeLimit(.minutes(1)))
+    func aGenerationKeepsTheHelperAliveAfterItsEngineAndModelAreReleased() async throws {
+        let helper = FakeHelper.greeting { request, helper in
+            guard request.op == "generate" else { return }
+            // Answers a moment later, after the caller has dropped the engine.
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(200)) {
+                helper.send(#"{"id":\#(request.id),"event":"tokens","tokens":[5]}"#)
+                helper.send(
+                    #"{"id":\#(request.id),"event":"finished","reason":"length","promptTokens":1,"#
+                        + #""cachedPromptTokens":0,"generatedTokens":1,"promptSeconds":0,"generationSeconds":0}"#)
+            }
+        }
+        func startGenerating() async throws -> AsyncThrowingStream<EngineEvent, any Error> {
+            let loaded = try await VMLXEngine(connection: helper.connection).open(model)
+            return loaded.generate(EngineRequest(promptTokens: [1], maxTokens: 1))
+        }
+
+        let events = try await events(startGenerating())
+
+        #expect(events == [
+            .tokens([5]),
+            .finished(EngineCompletion(
+                reason: .length, promptTokenCount: 1, generatedTokenCount: 1, promptTime: 0, generationTime: 0)),
+        ])
+    }
+
     @Test(.timeLimit(.minutes(1)))
     func everyCloseReturnsOnlyOnceTheHelperHasLetTheModelGo() async throws {
         let closeRequest = Mutex<UInt64?>(nil)

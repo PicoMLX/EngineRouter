@@ -1,4 +1,5 @@
 #if os(macOS)
+import Darwin
 import Foundation
 import Synchronization
 
@@ -67,6 +68,9 @@ final class HelperConnection: Sendable {
     ///   - fromHelper: Where the helper's messages are read, on a thread of
     ///     the connection's own until the stream ends.
     init(toHelper: FileHandle, fromHelper: FileHandle) {
+        // A helper that has exited makes a write fail rather than raise
+        // SIGPIPE, which would end the app.
+        _ = fcntl(toHelper.fileDescriptor, F_SETNOSIGPIPE, 1)
         self.toHelper = toHelper
         let reader = Thread { [self] in
             while let frame = Self.readFrame(from: fromHelper) {

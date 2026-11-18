@@ -133,7 +133,10 @@ final class VMLXModel: LoadedModel {
                 "temperature": request.temperature.map { Double($0) as Any } ?? NSNull(),
                 "topP": request.topP.map { Double($0) as Any } ?? NSNull(),
             ])
-            let forwarding = Task {
+            // The generation keeps the model, and so the helper, alive until it ends,
+            // even when the caller has already released them.
+            let forwarding = Task { [self] in
+                defer { withExtendedLifetime(self) {} }
                 do {
                     for try await reply in replies {
                         if let event = try Self.event(reply) { continuation.yield(event) }
