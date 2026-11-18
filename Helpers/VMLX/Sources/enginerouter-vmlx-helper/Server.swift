@@ -102,6 +102,9 @@ final class Model {
     var container: ModelContainer?
     var engine: BatchEngine?
     var tokenizer: (any MLXLMCommon.Tokenizer)?
+    /// Temp-directory tokenizer shims the load wrote. The helper never loads a
+    /// configuration twice, so it removes them when the model closes.
+    var tokenizerShims: [URL] = []
     var closing = false
     var closeTask: Task<Void, Never>?
     /// In-flight generate requests on this model, by request id.
@@ -309,8 +312,12 @@ actor Server {
             let tokenizer = await container.tokenizer
             let handle = nextHandle
             nextHandle += 1
-            models[handle] = Model(
+            let model = Model(
                 handle: handle, facts: facts, container: container, engine: engine, tokenizer: tokenizer)
+            if let tokenizerDirectory = try? await container.tokenizerDirectory {
+                model.tokenizerShims = JangLoader.temporaryShimDirectories(behind: tokenizerDirectory)
+            }
+            models[handle] = model
             log("opened model \(handle): \(facts.url.path)")
             reply(id, ["model": handle])
         } catch {
@@ -340,7 +347,8 @@ actor Server {
         model.container?.disableCaching()
         model.engine = nil
         model.tokenizer = nil
-        model.container = nil  // releasing the container also removes its temp shims
+        model.container = nil
+        for shim in model.tokenizerShims { try? FileManager.default.removeItem(at: shim) }
         models[model.handle] = nil
         Memory.clearCache()
         log("closed model \(model.handle)")
