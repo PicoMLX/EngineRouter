@@ -15,7 +15,10 @@ final class LocalCodeLibrary: @unchecked Sendable {
     ) -> UnsafeMutableRawPointer?
     typealias Close = @convention(c) (UnsafeMutableRawPointer?) -> Void
     typealias ResidentBytes = @convention(c) (UnsafeMutableRawPointer?) -> Int64
-    typealias Tokenize = @convention(c) (UnsafePointer<CChar>?, UnsafeMutablePointer<Int32>?, Int32) -> Int32
+    /// The text is UTF-8 bytes with a length, so it can hold NUL characters.
+    typealias Tokenize = @convention(c) (
+        UnsafePointer<UInt8>?, Int32, UnsafeMutablePointer<Int32>?, Int32
+    ) -> Int32
     typealias Detokenize = @convention(c) (
         UnsafePointer<Int32>?, Int32, UnsafeMutablePointer<CChar>?, Int32
     ) -> Int32
@@ -53,9 +56,22 @@ final class LocalCodeLibrary: @unchecked Sendable {
         open = try symbol("pico_local_code_open_v2")
         close = try symbol("pico_local_code_close_v2")
         residentBytes = try symbol("pico_local_code_resident_bytes_v2")
-        tokenize = try symbol("pico_local_code_tokenize_v2")
+        tokenize = try symbol("pico_local_code_tokenize_v3")
         detokenize = try symbol("pico_local_code_detokenize_v2")
         generateTokens = try symbol("pico_local_code_generate_tokens_v2")
+    }
+
+    /// The entry points themselves, for tests that have no library file.
+    init(
+        open: Open, close: Close, residentBytes: ResidentBytes, tokenize: Tokenize, detokenize: Detokenize,
+        generateTokens: GenerateTokens
+    ) {
+        self.open = open
+        self.close = close
+        self.residentBytes = residentBytes
+        self.tokenize = tokenize
+        self.detokenize = detokenize
+        self.generateTokens = generateTokens
     }
 
     /// Runs a blocking library call on ``queue``.
