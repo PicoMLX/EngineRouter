@@ -202,17 +202,19 @@ private final class Request: Sendable {
         continuation.yield(.tokens(UnsafeBufferPointer(start: tokens, count: Int(count)).map(Int.init)))
     }
 
-    /// `usage` holds five values: prompt tokens evaluated, prompt tokens
-    /// taken from a cache, tokens generated, prefill and decode microseconds.
+    /// `usage` holds six values: prompt tokens evaluated, prompt tokens
+    /// taken from a cache, tokens generated, prefill and decode microseconds,
+    /// and the end token that stopped the reply, or -1.
     func finish(_ status: Int32, _ usage: UnsafePointer<Int64>?) {
         switch status {
         case 0, 3:
-            let usage = usage.map { Array(UnsafeBufferPointer(start: $0, count: 5)) } ?? [0, 0, 0, 0, 0]
+            let usage = usage.map { Array(UnsafeBufferPointer(start: $0, count: 6)) } ?? [0, 0, 0, 0, 0, -1]
             continuation.yield(.finished(EngineCompletion(
                 reason: status == 0 ? .stop : .length,
                 promptTokenCount: Int(usage[0]), cachedPromptTokenCount: Int(usage[1]),
                 generatedTokenCount: Int(usage[2]),
-                promptTime: Double(usage[3]) / 1_000_000, generationTime: Double(usage[4]) / 1_000_000)))
+                promptTime: Double(usage[3]) / 1_000_000, generationTime: Double(usage[4]) / 1_000_000,
+                stopToken: status == 0 && usage[5] >= 0 ? Int(usage[5]) : nil)))
             continuation.finish()
         case 1:
             continuation.finish(throwing: CancellationError())

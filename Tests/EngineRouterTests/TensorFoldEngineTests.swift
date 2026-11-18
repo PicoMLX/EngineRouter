@@ -26,6 +26,8 @@ struct TensorFoldEngineTests {
 struct TensorFoldModelTests {
     private enum FakeLibrary {
         static let submits = Mutex(0)
+        /// What the fake engine reports: 4 tokens generated, stopped by token 9.
+        static let usage: [Int64] = [1, 0, 4, 10, 20, 9]
         static let closeMayFinish = DispatchSemaphore(value: 0)
         /// What the fake detokenizer writes: text with a NUL character inside it.
         static let text: [UInt8] = Array("a\u{0}b".utf8)
@@ -50,9 +52,11 @@ struct TensorFoldModelTests {
                 }
                 return Int32(text.count)
             },
-            submit: { _, _, _, _, _, _, _, _, _ in
+            // Stops at once, or at a limit of 2 runs to it; either way it names token 9.
+            submit: { _, _, _, _, maxTokens, _, _, callback, context in
                 FakeLibrary.submits.withLock { $0 += 1 }
-                return 1
+                FakeLibrary.usage.withUnsafeBufferPointer { callback?(context, nil, 0, maxTokens == 2 ? 3 : 0, $0.baseAddress) }
+                return 0
             },
             cancel: { _, _ in }, memory: { _, _ in 1 })
         return TensorFoldModel(library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!))
@@ -81,6 +85,20 @@ struct TensorFoldModelTests {
                 reason: .length, promptTokenCount: 0, generatedTokenCount: 0, promptTime: 0, generationTime: 0))
         ])
         #expect(FakeLibrary.submits.withLock { $0 } == 0)
+    }
+
+    @Test
+    func aReplyThatStoppedNamesItsStopTokenAndOneThatHitTheLimitNamesNone() async throws {
+        let model = model()
+        var completions: [EngineCompletion] = []
+        for limit in [nil, 2] {
+            for try await event in model.generate(EngineRequest(promptTokens: [1], maxTokens: limit)) {
+                if case .finished(let completion) = event { completions.append(completion) }
+            }
+        }
+
+        #expect(completions.map(\.reason) == [.stop, .length])
+        #expect(completions.map(\.stopToken) == [9, nil])
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -164,6 +182,25 @@ struct TensorFoldLiveTests {
         await router.close("tensorfold-live")
         #expect(await router.status().isEmpty)
         await #expect(throws: TensorFoldError.closed) { try await loaded.tokenize("x") }
+    }
+
+    /// Holds for any model: one whose reply stops within the limit shows the stop token.
+    @Test(.timeLimit(.minutes(10)))
+    func onlyAReplyThatStopsNamesAStopToken() async throws {
+        let loaded = try await engine.open(try model)
+        let prompt = try await loaded.tokenize(Self.prompt)
+        let (tokens, completion) = try await run(
+            loaded, EngineRequest(promptTokens: prompt, maxTokens: 32, temperature: 0))
+        await loaded.close()
+
+        let finished = try #require(completion)
+        print("TensorFold finished with \(finished.reason) after \(tokens.count) tokens, stop token \(String(describing: finished.stopToken))")
+        if finished.reason == .stop {
+            let stopToken = try #require(finished.stopToken)
+            #expect(!tokens.contains(stopToken))
+        } else {
+            #expect(finished.stopToken == nil)
+        }
     }
 
     private func run(

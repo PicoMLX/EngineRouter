@@ -104,10 +104,15 @@ public struct EngineCompletion: Sendable, Equatable {
     public var promptTime: TimeInterval
     /// Seconds from the first generated token to the last.
     public var generationTime: TimeInterval
+    /// The token that stopped the reply, when `reason` is `.stop` and the
+    /// engine knows which it was. It is not among the generated tokens. Some
+    /// chat formats end a reply with different tokens for different outcomes,
+    /// a finished answer or a tool call for example, so the app may need it.
+    public var stopToken: Int?
 
     public init(
         reason: Reason, promptTokenCount: Int, cachedPromptTokenCount: Int = 0, generatedTokenCount: Int,
-        promptTime: TimeInterval, generationTime: TimeInterval
+        promptTime: TimeInterval, generationTime: TimeInterval, stopToken: Int? = nil
     ) {
         self.reason = reason
         self.promptTokenCount = promptTokenCount
@@ -115,6 +120,7 @@ public struct EngineCompletion: Sendable, Equatable {
         self.generatedTokenCount = generatedTokenCount
         self.promptTime = promptTime
         self.generationTime = generationTime
+        self.stopToken = stopToken
     }
 }
 

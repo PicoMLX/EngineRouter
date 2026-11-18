@@ -108,6 +108,28 @@ struct MLXLiveTests {
         #expect(completion?.promptTokenCount == prompt.count)
         #expect(!tokens.isEmpty)
 
+        // A chat turn runs to the model's end token, which the completion names.
+        // The ChatML markers are the ones Qwen models use.
+        let endOfTurn = try await loaded.tokenize("<|im_end|>")
+        #expect(endOfTurn.count == 1)
+        let chat = try await loaded.tokenize(
+            "<|im_start|>user\nReply with one word: what is the capital of France?<|im_end|>\n"
+                + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        var reply: [Int] = []
+        var stopped: EngineCompletion?
+        for try await event in loaded.generate(EngineRequest(promptTokens: chat, maxTokens: 64, temperature: 0)) {
+            switch event {
+            case .tokens(let ids): reply += ids
+            case .finished(let finished): stopped = finished
+            }
+        }
+        print("MLX answered: \(try await loaded.detokenize(reply))")
+        #expect(stopped?.reason == .stop)
+        #expect(stopped?.stopToken == endOfTurn.first)
+        #expect(stopped?.generatedTokenCount == reply.count)
+        #expect(!reply.contains(endOfTurn[0]))
+        #expect(completion?.stopToken == nil, "The first request ended at its limit")
+
         await router.close("mlx-live")
         #expect(await router.status().isEmpty)
         await #expect(throws: MLXEngineError.closed) { try await loaded.tokenize("x") }

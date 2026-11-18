@@ -27,14 +27,26 @@ let router = Router(
 
 let model = try await router.open(EngineModel(id: "deepseek-4.1-flash", directory: modelDirectory))
 let prompt = try await model.tokenize("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+var reply: [Int] = []
 for try await event in model.generate(EngineRequest(promptTokens: prompt, maxTokens: 256)) {
     switch event {
-    case .tokens(let ids): print(try await model.detokenize(ids), terminator: "")
-    case .finished(let completion): print("\n\(completion.generatedTokenCount) tokens")
+    case .tokens(let ids): reply += ids
+    case .finished(let completion):
+        print(try await model.detokenize(reply))
+        print("\(completion.generatedTokenCount) tokens")
     }
 }
 await router.close(model.id)
 ```
+
+A completion whose reason is `.stop` names the token that stopped the reply in
+`stopToken`, for chat formats that end a reply with different tokens for
+different outcomes.
+
+A character can span several tokens, and half of one decodes to nothing or to
+U+FFFD, so decode tokens together, never one event at a time. To show text as
+it arrives, decode the reply so far and emit what that adds to the text
+already shown.
 
 The interface is token-level: the app renders the chat template and parses
 tool calls, so both behave the same on every engine. Cancelling the task that
@@ -77,6 +89,8 @@ let router = Router(engines: [MLXEngine()], memoryBudget: 96 << 30)
   reports the same `cache`, and `trim` drops all of it.
 - A request that sets no `temperature` or `topP` uses the model's own
   generation settings.
+- Tokens arrive one behind the model: the newest is held until the next shows
+  it was not the stop token.
 
 The package depends on the PicoMLX forks of mlx-swift and mlx-swift-lm at the
 branch `pico/integration`. SwiftPM wants one branch requirement for a package

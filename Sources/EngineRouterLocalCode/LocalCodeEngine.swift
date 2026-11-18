@@ -184,7 +184,8 @@ final class LocalCodeModel: LoadedModel {
                 return
             }
             state.withLock { $0.hasGenerated = true }
-            var usage = [Int64](repeating: 0, count: 4)
+            // Prompt tokens, generated tokens, prefill and decode microseconds, the stop token.
+            var usage = [Int64](repeating: 0, count: 5)
             let status = library.generateTokens(
                 handle.pointer, prompt, Int32(prompt.count), maxTokens, deterministic,
                 { context, tokens, count in
@@ -196,7 +197,8 @@ final class LocalCodeModel: LoadedModel {
                 continuation.yield(.finished(EngineCompletion(
                     reason: status == 0 ? .stop : .length,
                     promptTokenCount: Int(usage[0]), generatedTokenCount: Int(usage[1]),
-                    promptTime: Double(usage[2]) / 1_000_000, generationTime: Double(usage[3]) / 1_000_000)))
+                    promptTime: Double(usage[2]) / 1_000_000, generationTime: Double(usage[3]) / 1_000_000,
+                    stopToken: status == 0 && usage[4] >= 0 ? Int(usage[4]) : nil)))
                 continuation.finish()
             case 1:
                 continuation.finish(throwing: CancellationError())

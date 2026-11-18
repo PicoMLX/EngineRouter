@@ -62,6 +62,9 @@ public func engineContractViolations(
             check(
                 completion.reason != .length || generated.count == limit,
                 "The reason is .length but only \(generated.count) of \(limit) tokens were generated.")
+            check(
+                completion.reason == .stop || completion.stopToken == nil,
+                "The completion names a stop token but its reason is not .stop.")
         }
 
         // Greedy generation repeats.
