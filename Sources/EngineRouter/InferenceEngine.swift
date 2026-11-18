@@ -24,6 +24,9 @@ public protocol InferenceEngine: Sendable {
     /// A short stable name, such as `"mlx"`, for logs and status.
     var name: String { get }
 
+    /// Source identity for this engine build, if available without opening a model.
+    var buildInfo: EngineBuildInfo? { get }
+
     /// Whether this engine sizes itself to the machine's free memory. A model of
     /// an exclusive engine opens only when no other model is open, and no other
     /// model opens beside it.
@@ -38,6 +41,10 @@ public protocol InferenceEngine: Sendable {
     func loadBytes(_ model: EngineModel) async throws -> Int
 
     func open(_ model: EngineModel) async throws -> any LoadedModel
+}
+
+public extension InferenceEngine {
+    var buildInfo: EngineBuildInfo? { nil }
 }
 
 /// A model an engine has loaded and can generate with.

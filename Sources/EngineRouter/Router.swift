@@ -30,6 +30,13 @@ public actor Router {
         self.memoryBudget = memoryBudget
     }
 
+    /// Known build information by engine name, available before any models open.
+    /// When a name is registered more than once, the first registration supplies it.
+    public nonisolated func engineBuildInfos() -> [String: EngineBuildInfo] {
+        Dictionary(engines.map { ($0.name, $0.buildInfo) }, uniquingKeysWith: { first, _ in first })
+            .compactMapValues { $0 }
+    }
+
     /// Opens `model`, or returns it when it is already open or opening. A
     /// model that is closing finishes closing first and then opens afresh.
     public func open(_ model: EngineModel) async throws -> any LoadedModel {

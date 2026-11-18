@@ -1,6 +1,7 @@
 #if os(macOS)
 import Darwin
 import Dispatch
+import EngineRouter
 import Foundation
 
 /// The TensorFold dynamic library and its C entry points.
@@ -47,6 +48,7 @@ final class TensorFoldLibrary: @unchecked Sendable {
     let submit: Submit
     let cancel: Cancel
     let memory: Memory
+    let buildInfo: EngineBuildInfo?
 
     init(url: URL) throws {
         guard url.isFileURL else { throw TensorFoldError.library("The TensorFold library must be a local file.") }
@@ -79,6 +81,7 @@ final class TensorFoldLibrary: @unchecked Sendable {
         submit = try symbol("pico_tf_submit")
         cancel = try symbol("pico_tf_cancel")
         memory = try symbol("pico_tf_memory")
+        buildInfo = .loadNative(from: handle, symbol: "pico_tf_build_info_v1")
     }
 
     /// The entry points themselves, for tests that have no library file.
@@ -95,6 +98,7 @@ final class TensorFoldLibrary: @unchecked Sendable {
         self.submit = submit
         self.cancel = cancel
         self.memory = memory
+        self.buildInfo = nil
     }
 
     /// Runs a blocking library call on ``queue``.

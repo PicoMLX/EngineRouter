@@ -16,9 +16,17 @@ import Tokenizers
 /// are not batched together.
 public struct MLXEngine: InferenceEngine {
     public let name = "mlx"
+    public let buildInfo: EngineBuildInfo?
     public let isExclusive = false
 
-    public init() {}
+    public init() {
+        self.init(buildInfo: nil)
+    }
+
+    /// Supply the linked mlx-swift-lm revision from the host build's dependency resolution.
+    public init(buildInfo: EngineBuildInfo?) {
+        self.buildInfo = buildInfo
+    }
 
     public func canServe(_ model: EngineModel) async -> Bool {
         weightBytes(in: model.directory) != nil

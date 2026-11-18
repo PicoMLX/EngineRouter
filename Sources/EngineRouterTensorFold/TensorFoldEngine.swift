@@ -17,6 +17,8 @@ public struct TensorFoldEngine: InferenceEngine {
 
     private let library: TensorFoldLibrary
 
+    public var buildInfo: EngineBuildInfo? { library.buildInfo }
+
     /// - Parameter libraryURL: The `libPicoTensorFold.dylib` to load.
     public init(libraryURL: URL) throws {
         library = try TensorFoldLibrary(url: libraryURL)

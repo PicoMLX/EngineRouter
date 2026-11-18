@@ -9,6 +9,20 @@ struct RouterTests {
     }
 
     @Test
+    func reportsRegisteredEngineBuildsWithoutOpeningAModel() {
+        let first = EngineBuildInfo(revision: String(repeating: "a", count: 40), tag: "v1.2.3", dirty: false)
+        let second = EngineBuildInfo(revision: String(repeating: "b", count: 40), dirty: true)
+        let router = Router(
+            engines: [
+                StubEngine(name: "a", buildInfo: first), StubEngine(name: "a", buildInfo: second),
+                StubEngine(name: "b", buildInfo: second), StubEngine(name: "unknown"),
+            ],
+            memoryBudget: 1000)
+
+        #expect(router.engineBuildInfos() == ["a": first, "b": second])
+    }
+
+    @Test
     func aModelGoesToTheFirstEngineThatCanServeIt() async throws {
         let router = Router(
             engines: [StubEngine(name: "a"), StubEngine(name: "b"), StubEngine(name: "b", loadBytes: 1)],
