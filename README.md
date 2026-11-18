@@ -39,6 +39,10 @@ for try await event in model.generate(EngineRequest(promptTokens: prompt, maxTok
 await router.close(model.id)
 ```
 
+A completion whose reason is `.stop` names the token that stopped the reply in
+`stopToken`, for chat formats that end a reply with different tokens for
+different outcomes.
+
 A character can span several tokens, and half of one decodes to nothing or to
 U+FFFD, so decode tokens together, never one event at a time. To show text as
 it arrives, decode the reply so far and emit what that adds to the text

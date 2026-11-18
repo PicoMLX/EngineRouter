@@ -58,7 +58,7 @@ final class LocalCodeLibrary: @unchecked Sendable {
         residentBytes = try symbol("pico_local_code_resident_bytes_v2")
         tokenize = try symbol("pico_local_code_tokenize_v3")
         detokenize = try symbol("pico_local_code_detokenize_v2")
-        generateTokens = try symbol("pico_local_code_generate_tokens_v2")
+        generateTokens = try symbol("pico_local_code_generate_tokens_v3")
     }
 
     /// The entry points themselves, for tests that have no library file.
