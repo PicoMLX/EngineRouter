@@ -27,6 +27,22 @@ struct MLXModelDirectoryTests {
         #expect(try await MLXEngine().loadBytes(model) == 4000)
     }
 
+    /// The Hugging Face cache stores a snapshot's files as links into its blob store.
+    @Test
+    func aLinkedWeightFileCountsAtItsTargetsSize() async throws {
+        let blobs = try directory(["weights-blob": 5000])
+        let directory = try directory(["config.json": 10])
+        defer {
+            try? FileManager.default.removeItem(at: blobs)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createSymbolicLink(
+            at: directory.appendingPathComponent("model.safetensors"),
+            withDestinationURL: blobs.appendingPathComponent("weights-blob"))
+
+        #expect(try await MLXEngine().loadBytes(EngineModel(id: "m", directory: directory)) == 5000)
+    }
+
     @Test(arguments: [
         ["model.safetensors": 100],  // no config
         ["config.json": 10, "model.gguf": 100],  // no safetensors weights
