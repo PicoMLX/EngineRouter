@@ -137,23 +137,37 @@ final class MLXModel: LoadedModel {
 
         let parameters = settings
         let promptTokens = request.promptTokens
+        // The library delivers the stop token as the reply's last token, and
+        // only its completion says whether the last token was one.
         let tokens = try await container.perform { context in
             try generateTokens(
-                input: LMInput(tokens: MLXArray(promptTokens)), parameters: parameters, context: context)
+                input: LMInput(tokens: MLXArray(promptTokens)), parameters: parameters, context: context,
+                includeStopToken: true)
+        }
+        // The newest token, held until the next event shows it was not the stop token.
+        var held: Int?
+        var delivered = 0
+        func deliverHeld() {
+            guard let token = held else { return }
+            continuation.yield(.tokens([token]))
+            delivered += 1
+            held = nil
         }
         // Leaving this loop, by cancellation too, ends the library's stream,
         // which stops its generation.
         for await event in tokens {
             switch event {
             case .token(let token):
-                continuation.yield(.tokens([token]))
+                deliverHeld()
+                held = token
             case .info(let info):
                 if info.stopReason == .cancelled { throw CancellationError() }
+                let stopToken = info.stopReason == .stop ? held : nil
+                if stopToken == nil { deliverHeld() }
                 continuation.yield(.finished(EngineCompletion(
                     reason: info.stopReason == .length ? .length : .stop,
-                    promptTokenCount: info.promptTokenCount,
-                    generatedTokenCount: info.generationTokenCount,
-                    promptTime: info.promptTime, generationTime: info.generateTime)))
+                    promptTokenCount: info.promptTokenCount, generatedTokenCount: delivered,
+                    promptTime: info.promptTime, generationTime: info.generateTime, stopToken: stopToken)))
             }
         }
         try Task.checkCancellation()

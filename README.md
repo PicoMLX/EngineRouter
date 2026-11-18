@@ -89,6 +89,8 @@ let router = Router(engines: [MLXEngine()], memoryBudget: 96 << 30)
   reports the same `cache`, and `trim` drops all of it.
 - A request that sets no `temperature` or `topP` uses the model's own
   generation settings.
+- Tokens arrive one behind the model: the newest is held until the next shows
+  it was not the stop token.
 
 The package depends on the PicoMLX forks of mlx-swift and mlx-swift-lm at the
 branch `pico/integration`. SwiftPM wants one branch requirement for a package
