@@ -32,6 +32,13 @@ let package = Package(
             name: "EngineRouterMLXServe",
             targets: ["EngineRouterMLXServe"]
         ),
+        // macOS only. Talks to a helper process that runs vmlx-swift, the
+        // engine the Osaurus app uses. The helper is its own package, in
+        // Helpers/VMLX, because vmlx-swift cannot share a build with mlx-swift.
+        .library(
+            name: "EngineRouterVMLX",
+            targets: ["EngineRouterVMLX"]
+        ),
         // MLX models, run with mlx-swift-lm.
         .library(
             name: "EngineRouterMLX",
@@ -79,6 +86,13 @@ let package = Package(
             ],
         ),
         .target(
+            name: "EngineRouterVMLX",
+            dependencies: ["EngineRouter"],
+            swiftSettings: [
+                .enableUpcomingFeature("ApproachableConcurrency"),
+            ],
+        ),
+        .target(
             name: "EngineRouterMLX",
             dependencies: [
                 "EngineRouter",
@@ -96,7 +110,7 @@ let package = Package(
             name: "EngineRouterTests",
             dependencies: [
                 "EngineRouter", "EngineRouterLocalCode", "EngineRouterMLX", "EngineRouterMLXServe",
-                "EngineRouterTensorFold",
+                "EngineRouterTensorFold", "EngineRouterVMLX",
             ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
