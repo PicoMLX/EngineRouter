@@ -62,7 +62,7 @@ a model on its own, so the caller decides what to close.
 | Engine | How it is sourced | Licence | State |
 |---|---|---|---|
 | [mlx-swift-lm](https://github.com/ronaldmannak/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | Planned (`EngineRouterMLX`) |
-| [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/pico/native-bridge), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
+| [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/engine-router), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
 | [TensorFold](https://github.com/ashhart/TensorFold) | A fork, when that adapter starts | Apache-2.0 | Later |
@@ -73,11 +73,11 @@ Each adapter is its own library product. An app that depends only on
 ## Building the Local Code library
 
 `EngineRouterLocalCode` loads `PicoLocalCodeNative.dylib`, which you build
-from the `pico/native-bridge` branch of the fork with Xcode and
+from the `engine-router` branch of the fork with Xcode and
 [Bazelisk](https://github.com/bazelbuild/bazelisk) on Apple silicon:
 
 ```sh
-GIT_LFS_SKIP_SMUDGE=1 git clone --branch pico/native-bridge https://github.com/PicoMLX/local-code-community.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch engine-router https://github.com/PicoMLX/local-code-community.git
 cd local-code-community
 ln -s WORKSPACE.darwin WORKSPACE
 echo 'try-import %workspace%/.bazelrc.darwin' > .bazelrc
