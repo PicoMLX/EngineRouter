@@ -22,6 +22,21 @@ let package = Package(
             name: "EngineRouterLocalCode",
             targets: ["EngineRouterLocalCode"]
         ),
+        // MLX models, run with mlx-swift-lm.
+        .library(
+            name: "EngineRouterMLX",
+            targets: ["EngineRouterMLX"]
+        ),
+    ],
+    dependencies: [
+        // The PicoMLX forks, on the branch PicoCore builds against. SwiftPM
+        // wants one branch requirement for a package across the whole graph,
+        // and mlx-swift-lm's manifest names mlx-swift's, so these two and
+        // PicoCore's move together.
+        .package(url: "https://github.com/PicoMLX/mlx-swift-lm", branch: "pico/integration"),
+        .package(url: "https://github.com/PicoMLX/mlx-swift", branch: "pico/integration"),
+        // The tokenizer loader macro in MLXHuggingFace expands to code that uses Tokenizers.
+        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.4.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -39,9 +54,23 @@ let package = Package(
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
         ),
+        .target(
+            name: "EngineRouterMLX",
+            dependencies: [
+                "EngineRouter",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ],
+            swiftSettings: [
+                .enableUpcomingFeature("ApproachableConcurrency"),
+            ],
+        ),
         .testTarget(
             name: "EngineRouterTests",
-            dependencies: ["EngineRouter", "EngineRouterLocalCode"],
+            dependencies: ["EngineRouter", "EngineRouterLocalCode", "EngineRouterMLX"],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],

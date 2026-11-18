@@ -12,8 +12,8 @@ routes each model to the engine that can serve it.
 
 ## Status
 
-Early. The engine interface, the router and the Local Code adapter exist.
-The MLX and mlx-serve adapters are next.
+Early. The engine interface, the router, and the MLX and Local Code adapters
+exist. The mlx-serve adapter is next.
 
 ## Using it
 
@@ -49,7 +49,7 @@ a model on its own, so the caller decides what to close.
 
 | Engine | How it is sourced | Licence | State |
 |---|---|---|---|
-| [mlx-swift-lm](https://github.com/ronaldmannak/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | Planned (`EngineRouterMLX`) |
+| [mlx-swift-lm](https://github.com/PicoMLX/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | `EngineRouterMLX`, text only, one request at a time per call; see below |
 | [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/pico/native-bridge), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
@@ -57,6 +57,40 @@ a model on its own, so the caller decides what to close.
 
 Each adapter is its own library product. An app that depends only on
 `EngineRouter` links no engine.
+
+## Running MLX models
+
+`EngineRouterMLX` runs a model directory in the layout `mlx-community` models
+use: `config.json`, the tokenizer files and the weights as `.safetensors`
+files.
+
+```swift
+import EngineRouterMLX
+
+let router = Router(engines: [MLXEngine()], memoryBudget: 96 << 30)
+```
+
+- A model's `loadBytes` is the size of its weight files.
+- Each request starts from an empty KV cache and requests are not batched
+  together. PicoCore's own MLX path batches; this adapter does not yet.
+- MLX keeps one buffer cache for the whole process, so every open MLX model
+  reports the same `cache`, and `trim` drops all of it.
+- A request that sets no `temperature` or `topP` uses the model's own
+  generation settings.
+
+The package depends on the PicoMLX forks of mlx-swift and mlx-swift-lm at the
+branch `pico/integration`. SwiftPM wants one branch requirement for a package
+across the whole graph, so an app that also depends on those forks has to name
+the same branch.
+
+MLX needs its Metal library, which only an Xcode build produces, so the live
+test runs with `xcodebuild`, not `swift test`:
+
+```sh
+TEST_RUNNER_ENGINEROUTER_MLX_MODEL_DIR=/path/to/model \
+xcodebuild test -scheme EngineRouter-Package -destination 'platform=macOS' \
+  -only-testing:EngineRouterTests/MLXLiveTests
+```
 
 ## Building the Local Code library
 
