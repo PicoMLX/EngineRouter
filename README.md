@@ -61,13 +61,8 @@ a model on its own, so the caller decides what to close.
 
 | Engine | How it is sourced | Licence | State |
 |---|---|---|---|
-<<<<<<< HEAD
 | [mlx-swift-lm](https://github.com/PicoMLX/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | `EngineRouterMLX`, text only, one request at a time per call; see below |
 | [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/engine-router), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
-=======
-| [mlx-swift-lm](https://github.com/ronaldmannak/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | Planned (`EngineRouterMLX`) |
-| [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/engine-router), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
->>>>>>> claude/phase-3-engine-contract
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | Our fork, exporting its existing C engine table from a library | MIT | Planned |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | Planned |
 | [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/engine-router), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
