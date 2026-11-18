@@ -32,4 +32,22 @@ struct EngineContractTests {
 
         #expect(violations.first == "canServe refuses the model.")
     }
+
+    @Test
+    func aModelIsClosedWhenACheckThrows() async {
+        let engine = StubEngine(name: "a", failsToTokenize: true)
+
+        let violations = await engineContractViolations(of: engine, model: model, prompt: "hi")
+
+        #expect(violations == ["Threw cannotTokenize."])
+        #expect(engine.log.closed == ["a-one"])
+    }
+
+    @Test
+    func theSameEngineAndModelCanBeCheckedTwice() async {
+        let engine = StubEngine(name: "a")
+
+        #expect(await engineContractViolations(of: engine, model: model, prompt: "hi") == [])
+        #expect(await engineContractViolations(of: engine, model: model, prompt: "hi") == [])
+    }
 }
