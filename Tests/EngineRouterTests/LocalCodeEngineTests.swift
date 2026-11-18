@@ -96,9 +96,11 @@ struct LocalCodeModelTests {
                 }
                 return Int32(text.count)
             },
-            generateTokens: { _, _, _, _, _, _, _, _ in
+            // Stops at token 7, or runs to a limit of 2; either way it writes 7 as the stop token.
+            generateTokens: { _, _, _, maxTokens, _, _, _, usage in
                 FakeLibrary.generations.withLock { $0 += 1 }
-                return 0
+                usage?[4] = 7
+                return maxTokens == 2 ? 3 : 0
             })
         return LocalCodeModel(
             library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!), residentBytes: 1)
@@ -127,6 +129,20 @@ struct LocalCodeModelTests {
                 reason: .length, promptTokenCount: 0, generatedTokenCount: 0, promptTime: 0, generationTime: 0))
         ])
         #expect(FakeLibrary.generations.withLock { $0 } == 0)
+    }
+
+    @Test
+    func aReplyThatStoppedNamesItsStopTokenAndOneThatHitTheLimitNamesNone() async throws {
+        let model = model()
+        var completions: [EngineCompletion] = []
+        for limit in [nil, 2] {
+            for try await event in model.generate(EngineRequest(promptTokens: [1], maxTokens: limit)) {
+                if case .finished(let completion) = event { completions.append(completion) }
+            }
+        }
+
+        #expect(completions.map(\.reason) == [.stop, .length])
+        #expect(completions.map(\.stopToken) == [7, nil])
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -204,6 +220,7 @@ struct LocalCodeLiveTests {
         let finished = try #require(completion)
         #expect(answer.contains("12") || answer.localizedCaseInsensitiveContains("twelve"))
         #expect(finished.reason == .stop)
+        #expect(finished.stopToken == 1, "DeepSeek's end-of-sentence token")
         #expect(finished.generatedTokenCount == tokens.count)
         #expect(finished.promptTokenCount == prompt.count)
         #expect(await loaded.memory().active == status.loadBytes)
@@ -211,6 +228,7 @@ struct LocalCodeLiveTests {
         // The token limit ends a request early.
         let limited = try await run(loaded, EngineRequest(promptTokens: prompt, maxTokens: 2, temperature: 0))
         #expect(limited.completion?.reason == .length)
+        #expect(limited.completion?.stopToken == nil)
         #expect(limited.completion?.generatedTokenCount == 2)
         #expect(limited.tokens == Array(tokens.prefix(2)))
 
