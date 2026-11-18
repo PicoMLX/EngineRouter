@@ -33,7 +33,7 @@ final class TensorFoldLibrary: @unchecked Sendable {
     typealias Memory = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Int64>?) -> Int32
 
     /// The version of the library's C interface this adapter is written against.
-    static let interfaceVersion: Int32 = 2
+    static let interfaceVersion: Int32 = 3
 
     /// Opening and closing a model block, so they run off Swift's cooperative executor.
     static let queue = DispatchQueue(label: "enginerouter.tensorfold", qos: .userInitiated)
