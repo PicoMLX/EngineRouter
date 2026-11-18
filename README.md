@@ -27,14 +27,22 @@ let router = Router(
 
 let model = try await router.open(EngineModel(id: "deepseek-4.1-flash", directory: modelDirectory))
 let prompt = try await model.tokenize("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+var reply: [Int] = []
 for try await event in model.generate(EngineRequest(promptTokens: prompt, maxTokens: 256)) {
     switch event {
-    case .tokens(let ids): print(try await model.detokenize(ids), terminator: "")
-    case .finished(let completion): print("\n\(completion.generatedTokenCount) tokens")
+    case .tokens(let ids): reply += ids
+    case .finished(let completion):
+        print(try await model.detokenize(reply))
+        print("\(completion.generatedTokenCount) tokens")
     }
 }
 await router.close(model.id)
 ```
+
+A character can span several tokens, and half of one decodes to nothing or to
+U+FFFD, so decode tokens together, never one event at a time. To show text as
+it arrives, decode the reply so far and emit what that adds to the text
+already shown.
 
 The interface is token-level: the app renders the chat template and parses
 tool calls, so both behave the same on every engine. Cancelling the task that
