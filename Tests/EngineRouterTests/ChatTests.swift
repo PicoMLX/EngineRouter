@@ -130,6 +130,24 @@ struct ChatCompletionsStreamTests {
         #expect(completion.reason == .length)
     }
 
+    /// The limit can stop the model inside a call, so no call from such a
+    /// turn is handed over as complete.
+    @Test
+    func aTurnCutShortByItsLimitOffersNoneOfItsCalls() throws {
+        let result = try events([
+            delta(#"{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"weather","arguments":"{\"city\":"}}]}"#),
+            delta("{}", finish: "length"),
+            usage,
+        ])
+
+        #expect(result.events.count == 1)
+        guard case .finished(let completion) = result.events.first else {
+            Issue.record("The turn did not finish.")
+            return
+        }
+        #expect(completion.reason == .length)
+    }
+
     @Test
     func anErrorChunkThrowsItsMessage() {
         #expect(throws: ChatError.engine("No room.")) {

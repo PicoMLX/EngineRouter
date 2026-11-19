@@ -279,11 +279,15 @@ package struct ChatCompletionsStream {
             default: reason = calls.isEmpty ? .stop : .toolCalls
             }
             if choice["finish_reason"] is String {
-                events += calls.keys.sorted().map { index in
-                    let call = calls[index]!
-                    return .toolCall(ChatToolCall(
-                        id: call.id.isEmpty ? "call_\(index)" : call.id, name: call.name,
-                        arguments: call.arguments.isEmpty ? "{}" : call.arguments))
+                // A turn its limit cut short may have stopped inside a call,
+                // so none of its calls is handed over as complete.
+                if reason != .length {
+                    events += calls.keys.sorted().map { index in
+                        let call = calls[index]!
+                        return .toolCall(ChatToolCall(
+                            id: call.id.isEmpty ? "call_\(index)" : call.id, name: call.name,
+                            arguments: call.arguments.isEmpty ? "{}" : call.arguments))
+                    }
                 }
                 calls = [:]
             }
