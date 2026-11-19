@@ -89,7 +89,7 @@ a model on its own, so the caller decides what to close.
 | Engine | How it is sourced | Licence | State |
 |---|---|---|---|
 | [mlx-swift-lm](https://github.com/PicoMLX/mlx-swift-lm) | Our fork, on the same branch requirement PicoCore uses | MIT | `EngineRouterMLX`, text only, one request at a time per call; see below |
-| [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/engine-router), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 checkpoints; see the licence note |
+| [Local Code](https://github.com/drawthingsai/local-code-community) | [Our fork](https://github.com/PicoMLX/local-code-community/tree/engine-router), built locally into a dynamic library | GPL-3.0 | `EngineRouterLocalCode`, macOS only, DeepSeek 4.1 and GLM 5.3 Flash checkpoints; see the licence note |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | [Our fork](https://github.com/PicoMLX/mlx-serve/tree/engine-router), built locally into a dynamic library with its own copy of MLX | MIT | `EngineRouterMLXServe`, macOS 26.2 or later, text only; see below |
 | [Sushi](https://github.com/beamivalice/sushi) EXL3 | Through mlx-serve's vendored EXL3 module | Via mlx-serve | In the mlx-serve library, not yet run with an EXL3 model |
 | [TensorFold](https://github.com/ashhart/TensorFold) | [Our fork](https://github.com/PicoMLX/TensorFold/tree/engine-router), built locally into a dynamic library | Apache-2.0 | `EngineRouterTensorFold`, macOS only; so far run only against a synthetic checkpoint, see below |
@@ -151,18 +151,29 @@ bazelisk build -c opt //Apps/LocalCode:PicoLocalCodeNative
 The library is `bazel-bin/Apps/LocalCode/PicoLocalCodeNative.dylib`. It
 requires macOS 27.
 
-A model directory holds the `.ckpt` checkpoint, its `.engram` file with the
-same base name, and optionally the DSpark drafter (a second `.ckpt` whose name
-contains `dspark`). To run the live test against it:
+It serves two families, each in a directory of its own:
+
+- **DeepSeek 4.1:** the `.ckpt` checkpoint, its `.engram` file with the same
+  base name, and optionally the DSpark drafter (a second `.ckpt` whose name
+  contains `dspark`).
+- **GLM 5.3 Flash:** the checkpoint as Local Code names it,
+  `glm_5.3_flash_*.ckpt`, and optionally its DFlash2 drafter (a second one
+  whose name contains `dflash`). A directory with an `.engram` file is read
+  as DeepSeek 4.1.
+
+To run the live tests against them:
 
 ```sh
 ENGINEROUTER_LOCAL_CODE_LIBRARY=/path/to/PicoLocalCodeNative.dylib \
 ENGINEROUTER_LOCAL_CODE_MODEL_DIR=/path/to/deepseek \
-swift test --filter LocalCodeLiveTests
+ENGINEROUTER_LOCAL_CODE_GLM_DIR=/path/to/glm \
+swift test --filter "LocalCodeLiveTests|LocalCodeGLMLiveTests"
 ```
 
-Its models are chat models: Local Code's own code lays out DeepSeek 4.1's
-prompts, tools included, and parses its replies. A model keeps the KV caches
+Its models are chat models: Local Code's own code lays out each family's
+prompts, tools included, and parses its replies. Only DeepSeek 4.1 also
+serves the token-level calls, which speak its tokens; a GLM model throws
+`LocalCodeError.chatOnly` from them. A model keeps the KV caches
 of its last four conversations, so a turn that goes on from an earlier reply
 evaluates only its new tokens; `trim(toFree:)` lets those caches go. Through
 the token-level interface, each request starts from an empty KV cache.

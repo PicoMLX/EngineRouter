@@ -23,8 +23,9 @@ struct LocalCodeModelFilesTests {
         let files = try #require(ModelFiles(directory: directory))
 
         #expect(files.checkpoint.lastPathComponent == "model_i2x.ckpt")
-        #expect(files.engram.lastPathComponent == "model_i2x.engram")
+        #expect(files.engram?.lastPathComponent == "model_i2x.engram")
         #expect(files.drafter == nil)
+        #expect(files.servesTokens)
     }
 
     @Test
@@ -35,11 +36,38 @@ struct LocalCodeModelFilesTests {
         #expect(ModelFiles(directory: directory)?.drafter?.lastPathComponent == "model_dspark_i4x.ckpt")
     }
 
+    @Test
+    func aGLMCheckpointNeedsNoEngramFileAndIsServedThroughChatOnly() throws {
+        let directory = try directory(["glm_5.3_flash_i4x.ckpt", "notes.txt"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let files = try #require(ModelFiles(directory: directory))
+
+        #expect(files.checkpoint.lastPathComponent == "glm_5.3_flash_i4x.ckpt")
+        #expect(files.engram == nil)
+        #expect(files.drafter == nil)
+        #expect(!files.servesTokens)
+    }
+
+    @Test
+    func aDFlashCheckpointBesideGLMIsItsDrafter() throws {
+        let directory = try directory(["glm_5.3_flash_i4x.ckpt", "glm_5.3_flash_dflash2_i5x.ckpt"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let files = try #require(ModelFiles(directory: directory))
+
+        #expect(files.checkpoint.lastPathComponent == "glm_5.3_flash_i4x.ckpt")
+        #expect(files.drafter?.lastPathComponent == "glm_5.3_flash_dflash2_i5x.ckpt")
+    }
+
     @Test(arguments: [
         ["model.ckpt"],  // no engram file
         ["model.engram"],  // no checkpoint
         ["a.engram", "b.ckpt"],  // names do not match
         ["a.engram", "a.ckpt", "b.engram"],  // two engram files
+        ["glm_5.3_flash_i4x.ckpt.78e1a4.xet-partial"],  // a download still under way
+        ["glm_5.3_flash_i4x.ckpt", "glm_5.3_flash_i2x.ckpt"],  // two GLM checkpoints
+        ["glm_5.3_flash_dflash2_i5x.ckpt"],  // a drafter alone
     ])
     func otherDirectoriesAreNotLocalCodeModels(names: [String]) throws {
         let directory = try directory(names)
@@ -90,7 +118,7 @@ struct LocalCodeModelTests {
 
     private func model(
         close: @escaping LocalCodeLibrary.Close = { _ in }, chat: LocalCodeLibrary.Chat? = nil,
-        countChatTokens: LocalCodeLibrary.CountChatTokens? = nil
+        countChatTokens: LocalCodeLibrary.CountChatTokens? = nil, servesTokens: Bool = true
     ) -> LocalCodeModel {
         let library = LocalCodeLibrary(
             open: { _, _, _, _, _ in nil }, close: close, residentBytes: { _ in 1 },
@@ -118,7 +146,21 @@ struct LocalCodeModelTests {
             },
             chat: chat, countChatTokens: countChatTokens)
         return LocalCodeModel(
-            library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!), residentBytes: 1)
+            library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!), residentBytes: 1,
+            servesTokens: servesTokens)
+    }
+
+    /// GLM 5.3 Flash's tokens are not the DeepSeek 4.1 tokens the library's
+    /// token-level calls speak, so those calls refuse it rather than answer wrongly.
+    @Test
+    func aChatOnlyModelRefusesTheTokenLevelCalls() async throws {
+        let model = model(servesTokens: false)
+
+        await #expect(throws: LocalCodeError.chatOnly) { try await model.tokenize("a") }
+        await #expect(throws: LocalCodeError.chatOnly) { try await model.detokenize([1]) }
+        await #expect(throws: LocalCodeError.chatOnly) {
+            for try await _ in model.generate(EngineRequest(promptTokens: [1])) {}
+        }
     }
 
     @Test
@@ -282,6 +324,72 @@ struct LocalCodeModelTests {
 private enum LiveLocalCode {
     static var library: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_LOCAL_CODE_LIBRARY"] }
     static var modelDirectory: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_LOCAL_CODE_MODEL_DIR"] }
+    /// A directory holding a GLM 5.3 Flash checkpoint, and no Engram file.
+    static var glmDirectory: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_LOCAL_CODE_GLM_DIR"] }
+}
+
+/// One chat turn's text, tool calls and completion.
+private func chatTurn(
+    _ model: any ChatModel, _ request: ChatRequest
+) async throws -> (text: String, calls: [ChatToolCall], completion: ChatCompletion) {
+    var text = ""
+    var calls: [ChatToolCall] = []
+    var completion: ChatCompletion?
+    for try await event in model.chat(request) {
+        switch event {
+        case .text(let piece): text += piece
+        case .reasoning: break
+        case .toolCall(let call): calls.append(call)
+        case .finished(let finished): completion = finished
+        }
+    }
+    return (text, calls, try #require(completion))
+}
+
+/// GLM 5.3 Flash through Local Code's own chat format. Set the library and
+/// the GLM directory to enable it:
+///
+///     ENGINEROUTER_LOCAL_CODE_LIBRARY=/path/to/PicoLocalCodeNative.dylib \
+///     ENGINEROUTER_LOCAL_CODE_GLM_DIR=/path/to/glm swift test --filter LocalCodeGLMLiveTests
+@Suite(.enabled(if: LiveLocalCode.library != nil && LiveLocalCode.glmDirectory != nil), .serialized)
+struct LocalCodeGLMLiveTests {
+    @Test(.timeLimit(.minutes(30)))
+    func aToolRoundTripRunsThroughGLMsChatFormat() async throws {
+        let engine = try LocalCodeEngine(libraryURL: URL(fileURLWithPath: try #require(LiveLocalCode.library)))
+        let router = Router(engines: [engine], memoryBudget: Int(ProcessInfo.processInfo.physicalMemory))
+        let model = EngineModel(
+            id: "glm-5.3-flash", directory: URL(fileURLWithPath: try #require(LiveLocalCode.glmDirectory)))
+        let loaded = try await router.open(model)
+        let chat = try #require(loaded as? any ChatModel)
+        // Its tokens are not DeepSeek's, so the token-level calls refuse it.
+        await #expect(throws: LocalCodeError.chatOnly) { try await loaded.tokenize("x") }
+        let weather = ChatTool(
+            name: "get_weather", description: "Today's weather in a city.",
+            parameters: #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#)
+        var messages = [ChatMessage(role: .user, content: "What is the weather in Paris today? Use the tool.")]
+
+        let first = try await chatTurn(chat, ChatRequest(
+            messages: messages, tools: [weather], reasoning: false, maxTokens: 512, temperature: 0))
+        print("GLM called: \(first.calls), after \(first.text.debugDescription)")
+        let call = try #require(first.calls.first)
+        #expect(call.name == "get_weather")
+        #expect(call.arguments.contains("Paris"))
+        #expect(first.completion.reason == .toolCalls)
+
+        messages.append(ChatMessage(role: .assistant, content: first.text, toolCalls: first.calls))
+        messages.append(ChatMessage(role: .tool, content: #"{"forecast":"sunny","celsius":21}"#, toolCallID: call.id))
+        let request = ChatRequest(messages: messages, tools: [weather], reasoning: false, maxTokens: 512, temperature: 0)
+        let counted = try await chat.countPromptTokens(request)
+        let second = try await chatTurn(chat, request)
+        print("GLM answered: \(second.text)")
+        print("Second turn: \(second.completion.promptTokenCount) prompt tokens, \(second.completion.cachedPromptTokenCount) cached; counted \(counted)")
+        #expect(second.text.contains("21") || second.text.localizedCaseInsensitiveContains("sunny"))
+        #expect(second.completion.reason == .stop)
+        #expect(second.completion.promptTokenCount == counted)
+        #expect(second.completion.cachedPromptTokenCount > 0)
+
+        await router.close(model.id)
+    }
 }
 
 /// Runs against the real library and a DeepSeek 4.1 checkpoint. Set both
@@ -374,7 +482,7 @@ struct LocalCodeLiveTests {
             parameters: #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#)
         var messages = [ChatMessage(role: .user, content: "What is the weather in Paris today? Use the tool.")]
 
-        let first = try await turn(chat, ChatRequest(
+        let first = try await chatTurn(chat, ChatRequest(
             messages: messages, tools: [weather], reasoning: false, maxTokens: 512, temperature: 0))
         print("Local Code called: \(first.calls), after \(first.text.debugDescription)")
         let call = try #require(first.calls.first)
@@ -386,7 +494,7 @@ struct LocalCodeLiveTests {
         messages.append(ChatMessage(role: .tool, content: #"{"forecast":"sunny","celsius":21}"#, toolCallID: call.id))
         let request = ChatRequest(messages: messages, tools: [weather], reasoning: false, maxTokens: 512, temperature: 0)
         let counted = try await chat.countPromptTokens(request)
-        let second = try await turn(chat, request)
+        let second = try await chatTurn(chat, request)
         print("Local Code answered: \(second.text)")
         print("Second turn: \(second.completion.promptTokenCount) prompt tokens, \(second.completion.cachedPromptTokenCount) cached; counted \(counted)")
         #expect(second.text.contains("21") || second.text.localizedCaseInsensitiveContains("sunny"))
@@ -395,23 +503,6 @@ struct LocalCodeLiveTests {
         #expect(second.completion.cachedPromptTokenCount > 0)
 
         await router.close(model.id)
-    }
-
-    private func turn(
-        _ model: any ChatModel, _ request: ChatRequest
-    ) async throws -> (text: String, calls: [ChatToolCall], completion: ChatCompletion) {
-        var text = ""
-        var calls: [ChatToolCall] = []
-        var completion: ChatCompletion?
-        for try await event in model.chat(request) {
-            switch event {
-            case .text(let piece): text += piece
-            case .reasoning: break
-            case .toolCall(let call): calls.append(call)
-            case .finished(let finished): completion = finished
-            }
-        }
-        return (text, calls, try #require(completion))
     }
 
     @Test(.timeLimit(.minutes(30)))
