@@ -4,15 +4,15 @@ import Foundation
 import Synchronization
 
 /// Runs MLX models with vmlx-swift, the engine the Osaurus app uses, in a
-/// helper process.
+/// helper process or XPC service.
 ///
 /// vmlx-swift ships modules with the same names as the MLX libraries this
 /// package's own MLX adapter links, so the two cannot be built into one
-/// process. The helper is a separate executable that links vmlx-swift alone;
-/// this adapter starts it and talks to it over its standard input and output.
-///
-/// Starting a process is not allowed inside the App Store sandbox. An app
-/// there has to run the helper as an XPC service instead; see the README.
+/// process. The helper links vmlx-swift alone. This adapter starts it either
+/// as an executable, talking over its standard input and output, or as an XPC
+/// service in the app's bundle, which hands it a pair of pipes. The messages
+/// are the same either way. Starting a process is not allowed inside the App
+/// Store sandbox, so a sandboxed app uses the XPC service; see the README.
 public struct VMLXEngine: InferenceEngine {
     public let name = "vmlx"
     public let isExclusive = false
@@ -38,13 +38,71 @@ public struct VMLXEngine: InferenceEngine {
         try await self.init(
             connection: HelperConnection(
                 toHelper: toHelper.fileHandleForWriting, fromHelper: fromHelper.fileHandleForReading),
-            process: process)
+            host: process)
+    }
+
+    /// Starts a session with the helper's XPC service, which an app in the
+    /// App Store sandbox embeds in its bundle, and checks that it speaks this
+    /// adapter's protocol.
+    ///
+    /// - Parameter xpcServiceName: The service's bundle identifier.
+    public init(xpcServiceName: String) async throws {
+        try await self.init(xpcConnection: NSXPCConnection(serviceName: xpcServiceName))
+    }
+
+    /// Hands the service one end of each of two pipes and talks over the
+    /// other ends. Tests pass a connection to a listener in their own process.
+    init(xpcConnection: sending NSXPCConnection) async throws {
+        xpcConnection.remoteObjectInterface = NSXPCInterface(with: VMLXHelperXPC.self)
+        xpcConnection.resume()
+        let toHelper = Pipe()
+        let fromHelper = Pipe()
+        let started: Result<Void, any Error>
+        do {
+            try await Self.startSession(
+                xpcConnection, input: toHelper.fileHandleForReading, output: fromHelper.fileHandleForWriting)
+            started = .success(())
+        } catch {
+            started = .failure(error)
+        }
+        // The service holds its own copies. These close before the greeting,
+        // so the stream ends if the service does.
+        try? toHelper.fileHandleForReading.close()
+        try? fromHelper.fileHandleForWriting.close()
+        if case .failure(let error) = started {
+            xpcConnection.invalidate()
+            throw error
+        }
+        try await self.init(
+            connection: HelperConnection(
+                toHelper: toHelper.fileHandleForWriting, fromHelper: fromHelper.fileHandleForReading),
+            host: xpcConnection)
+    }
+
+    /// Returns once the service has started the session.
+    private static func startSession(
+        _ xpcConnection: NSXPCConnection, input: FileHandle, output: FileHandle
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            // XPC calls either the reply or the error handler; this guards against both.
+            let pending = Mutex<CheckedContinuation<Void, any Error>?>(continuation)
+            let failed: @Sendable (any Error) -> Void = { error in
+                pending.withLock { $0.take() }?.resume(throwing: VMLXError.launch(
+                    "The vmlx helper service did not start: \(error.localizedDescription)"))
+            }
+            guard let service = xpcConnection.remoteObjectProxyWithErrorHandler(failed) as? VMLXHelperXPC else {
+                return failed(VMLXError.launch("The connection offers no vmlx helper service."))
+            }
+            service.serve(input: input, output: output) {
+                pending.withLock { $0.take() }?.resume()
+            }
+        }
     }
 
     /// An engine over a connection that is already open. Tests pass one whose
-    /// other end stands in for the helper, and no process.
-    init(connection: HelperConnection, process: Process? = nil) async throws {
-        helper = Helper(connection: connection, process: process)
+    /// other end stands in for the helper, and nothing that hosts it.
+    init(connection: HelperConnection, host: sending AnyObject? = nil) async throws {
+        helper = Helper(connection: connection, host: host)
         let version = try await connection.call("hello").protocol
         guard version == HelperConnection.protocolVersion else {
             throw VMLXError.launch(
@@ -72,21 +130,33 @@ public struct VMLXEngine: InferenceEngine {
     }
 }
 
-/// The helper process, which runs for as long as an engine or one of its
-/// models refers to it. Ending its input makes it close its models and exit.
+/// The helper, which runs for as long as an engine or one of its models
+/// refers to it. Ending its input makes it close its models and end.
 final class Helper: Sendable {
     let connection: HelperConnection
-    /// Kept so the process is collected when it exits.
-    private let process: Mutex<Process?>
+    /// The helper's `Process`, kept so it is collected when it exits, or the
+    /// `NSXPCConnection` to its service.
+    private let host: Mutex<AnyObject?>
 
-    init(connection: HelperConnection, process: Process?) {
+    init(connection: HelperConnection, host: sending AnyObject?) {
         self.connection = connection
-        self.process = Mutex(process)
+        self.host = Mutex(host)
     }
 
     deinit {
         connection.close()
+        (host.withLock { $0 } as? NSXPCConnection)?.invalidate()
     }
+}
+
+/// The helper's XPC service. The service's own package declares the same
+/// protocol: the two packages cannot share a module, and XPC matches the
+/// method, not the protocol's name. Change both together.
+@objc(EngineRouterVMLXHelperXPC)
+protocol VMLXHelperXPC {
+    /// Serves one engine: reads requests from `input` and writes answers to
+    /// `output` until `input` ends. Replies once the session has started.
+    func serve(input: FileHandle, output: FileHandle, reply: @escaping () -> Void)
 }
 
 final class VMLXModel: LoadedModel {
@@ -180,7 +250,7 @@ final class VMLXModel: LoadedModel {
         }
     }
 
-    /// The helper process's MLX figures, which every model open in it shares.
+    /// The helper's MLX figures, which every model open in it shares.
     func memory() async -> EngineMemory {
         guard let result = try? await connection().call("memory", ["model": handle]) else {
             return EngineMemory(active: 0, cache: 0, peak: 0)

@@ -285,6 +285,97 @@ struct VMLXEngineTests {
         }
     }
 }
+/// Stands in for the helper's XPC service, in this process: answers the
+/// greeting and `canServe` on the pipes it is handed, or, when it `dies`,
+/// lets them go at once.
+private final class FakeService: NSObject, VMLXHelperXPC, NSXPCListenerDelegate, Sendable {
+    private let dies: Bool
+    private let ended = Mutex(false)
+
+    init(dies: Bool = false) {
+        self.dies = dies
+    }
+
+    /// Whether the input of a session it served has ended.
+    var inputEnded: Bool { ended.withLock { $0 } }
+
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        connection.exportedInterface = NSXPCInterface(with: VMLXHelperXPC.self)
+        connection.exportedObject = self
+        connection.resume()
+        return true
+    }
+
+    func serve(input: FileHandle, output: FileHandle, reply: @escaping () -> Void) {
+        reply()
+        if dies {
+            try? input.close()
+            try? output.close()
+            return
+        }
+        Thread { [self] in
+            while let frame = HelperConnection.readFrame(from: input) {
+                guard let request = try? JSONDecoder().decode(SentRequest.self, from: frame) else { continue }
+                let result = request.op == "hello" ? #"{"protocol":1,"engine":"fake"}"# : #"{"canServe":true}"#
+                try? output.write(contentsOf: HelperConnection.framed(Data(#"{"id":\#(request.id),"result":\#(result)}"#.utf8)))
+            }
+            ended.withLock { $0 = true }
+            try? output.close()
+        }.start()
+    }
+}
+
+/// The helper as an XPC service, reached through an anonymous listener in
+/// this process instead of one in the app's bundle.
+struct VMLXServiceTests {
+    private let model = EngineModel(id: "m", directory: URL(fileURLWithPath: "/models/m"))
+
+    private func listener(for service: FakeService) -> NSXPCListener {
+        let listener = NSXPCListener.anonymous()
+        listener.delegate = service
+        listener.resume()
+        return listener
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func anEngineTalksToItsHelperThroughTheService() async throws {
+        let service = FakeService()
+        let listener = listener(for: service)
+        defer { listener.invalidate() }
+
+        var engine: VMLXEngine? = try await VMLXEngine(
+            xpcConnection: NSXPCConnection(listenerEndpoint: listener.endpoint))
+        #expect(await engine?.canServe(model) == true)
+
+        // Releasing the engine ends the session's input, which ends the helper.
+        engine = nil
+        while !service.inputEnded { try await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    /// The greeting fails rather than waits: the app keeps no copy of the
+    /// service's end of either pipe.
+    @Test(.timeLimit(.minutes(1)))
+    func aServiceThatEndsTheSessionAtOnceFailsTheGreeting() async {
+        let service = FakeService(dies: true)
+        let listener = listener(for: service)
+        defer { listener.invalidate() }
+
+        await #expect(throws: VMLXError.helperExited) {
+            _ = try await VMLXEngine(xpcConnection: NSXPCConnection(listenerEndpoint: listener.endpoint))
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aServiceThatIsNotInTheBundleIsALaunchError() async {
+        await #expect {
+            _ = try await VMLXEngine(xpcServiceName: "com.example.no-such-vmlx-helper")
+        } throws: { error in
+            guard case VMLXError.launch = error else { return false }
+            return true
+        }
+    }
+}
+
 private enum LiveVMLX {
     static var helper: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_VMLX_HELPER"] }
     static var modelDirectory: String? { ProcessInfo.processInfo.environment["ENGINEROUTER_VMLX_MODEL_DIR"] }

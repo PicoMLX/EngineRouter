@@ -12,6 +12,25 @@ let engineDescription = "vmlx-swift, PicoMLX fork, engine-router"
 /// Sequences decoded together per model by the batch engine.
 let maxBatchSize = 8
 
+/// Loads run one at a time across every server in the process: the library
+/// adjusts process-wide MLX limits while loading and restores them afterwards.
+let processLoads = LoadQueue()
+
+actor LoadQueue {
+    private var tail: Task<Void, Never>?
+
+    /// Runs `load` once every load queued before it has finished.
+    func run(_ load: @escaping @Sendable () async -> Void) async {
+        let previous = tail
+        let task = Task {
+            await previous?.value
+            await load()
+        }
+        tail = task
+        await task.value
+    }
+}
+
 // MARK: - Requests
 
 struct Request: Decodable {
@@ -140,8 +159,7 @@ actor Server {
     private var models: [Int: Model] = [:]
     private var nextHandle = 1
     private var generations: [UInt64: Generation] = [:]
-    /// Loads run one at a time: the library adjusts process-wide MLX limits
-    /// while loading and restores them afterwards.
+    /// This server's loads, in the order they arrived, so `shutdown` can wait for them.
     private var loadChain: Task<Void, Never>?
     private var knownModelTypes: Set<String>?
 
@@ -199,7 +217,7 @@ actor Server {
             let previous = loadChain
             loadChain = Task {
                 await previous?.value
-                await self.open(id: id, directory: directory)
+                await processLoads.run { await self.open(id: id, directory: directory) }
             }
 
         case "close":
