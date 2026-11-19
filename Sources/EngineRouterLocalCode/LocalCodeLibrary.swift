@@ -4,7 +4,7 @@ import Dispatch
 import EngineRouter
 import Foundation
 
-/// The Local Code dynamic library and its token-level C entry points.
+/// The Local Code dynamic library and its C entry points.
 ///
 /// The function pointers and the handle are immutable, so the type is safe to
 /// share. Every call that touches a model goes through ``queue``.
@@ -28,6 +28,17 @@ final class LocalCodeLibrary: @unchecked Sendable {
         UnsafeMutableRawPointer?, UnsafeMutablePointer<Int64>?
     ) -> Int32
 
+    /// Receives one Chat Completions chunk as JSON text, or nil to ask whether
+    /// to go on. Returns 0 to cancel.
+    typealias ChatCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32
+    typealias Chat = @convention(c) (
+        UnsafeMutableRawPointer?, UnsafePointer<CChar>?, ChatCallback?, UnsafeMutableRawPointer?
+    ) -> Int32
+    typealias CountChatTokens = @convention(c) (
+        UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafeMutablePointer<CChar>?, Int32
+    ) -> Int32
+    typealias Trim = @convention(c) (UnsafeMutableRawPointer?) -> Int64
+
     /// Local Code keeps one process-wide runtime and its calls block, so they
     /// run one at a time, off Swift's cooperative executor.
     static let queue = DispatchQueue(label: "enginerouter.local-code", qos: .userInitiated)
@@ -38,6 +49,10 @@ final class LocalCodeLibrary: @unchecked Sendable {
     let tokenize: Tokenize
     let detokenize: Detokenize
     let generateTokens: GenerateTokens
+    /// The chat-level entry points, which a library built before them lacks.
+    let chat: Chat?
+    let countChatTokens: CountChatTokens?
+    let trim: Trim?
     let buildInfo: EngineBuildInfo?
 
     init(url: URL) throws {
@@ -61,13 +76,19 @@ final class LocalCodeLibrary: @unchecked Sendable {
         tokenize = try symbol("pico_local_code_tokenize_v3")
         detokenize = try symbol("pico_local_code_detokenize_v2")
         generateTokens = try symbol("pico_local_code_generate_tokens_v3")
+        func optionalSymbol<T>(_ name: String) -> T? {
+            dlsym(handle, name).map { unsafeBitCast($0, to: T.self) }
+        }
+        chat = optionalSymbol("pico_local_code_chat_v1")
+        countChatTokens = optionalSymbol("pico_local_code_count_chat_tokens_v1")
+        trim = optionalSymbol("pico_local_code_trim_v1")
         buildInfo = .loadNative(from: handle, symbol: "pico_local_code_build_info_v1")
     }
 
     /// The entry points themselves, for tests that have no library file.
     init(
         open: Open, close: Close, residentBytes: ResidentBytes, tokenize: Tokenize, detokenize: Detokenize,
-        generateTokens: GenerateTokens
+        generateTokens: GenerateTokens, chat: Chat? = nil, countChatTokens: CountChatTokens? = nil, trim: Trim? = nil
     ) {
         self.open = open
         self.close = close
@@ -75,8 +96,15 @@ final class LocalCodeLibrary: @unchecked Sendable {
         self.tokenize = tokenize
         self.detokenize = detokenize
         self.generateTokens = generateTokens
+        self.chat = chat
+        self.countChatTokens = countChatTokens
+        self.trim = trim
         self.buildInfo = nil
     }
+
+    /// The error for a chat call on a library built before the chat entry points.
+    static let noChat = LocalCodeError.library(
+        "The Local Code library has no chat entry points. Rebuild it from the fork.")
 
     /// Runs a blocking library call on ``queue``.
     func onQueue<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {

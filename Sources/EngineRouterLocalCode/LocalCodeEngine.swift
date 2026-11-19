@@ -4,7 +4,8 @@ import Foundation
 import Synchronization
 
 /// Runs DeepSeek 4.1 checkpoints with Local Code's engine, loaded from a
-/// dynamic library built from the Local Code fork.
+/// dynamic library built from the Local Code fork. Its models are
+/// ``ChatModel``s: Local Code formats the conversation and reads the reply.
 ///
 /// Local Code is GPL-3.0. See the licence note in the README before shipping
 /// an app that includes the library.
@@ -102,14 +103,18 @@ struct ModelFiles: Equatable {
     }
 }
 
-final class LocalCodeModel: LoadedModel {
+final class LocalCodeModel: ChatModel {
     private struct State {
         /// Set by the first `close`; every later `close` waits for the same one.
         var closing: Task<Void, Never>?
         /// Whether a generation has started, which is when the weights load.
         var hasGenerated = false
-        var requests: [ObjectIdentifier: Request] = [:]
+        /// How to cancel each running request.
+        var requests: [ObjectIdentifier: @Sendable () -> Void] = [:]
     }
+
+    /// The model name a chat request carries. The handle says which model it is.
+    private static let requestModel = "local-code"
 
     private let library: LocalCodeLibrary
     private let handle: ModelHandle
@@ -164,7 +169,7 @@ final class LocalCodeModel: LoadedModel {
         let running = Request(continuation: continuation)
         let accepted = state.withLock { state in
             guard state.closing == nil else { return false }
-            state.requests[ObjectIdentifier(running)] = running
+            state.requests[ObjectIdentifier(running)] = running.cancel
             return true
         }
         guard accepted else {
@@ -216,13 +221,88 @@ final class LocalCodeModel: LoadedModel {
         return EngineMemory(active: active, cache: 0, peak: active)
     }
 
-    /// Local Code keeps no cache this adapter can drop.
-    func trim(toFree bytes: Int) async -> Int { 0 }
+    /// Local Code lays the conversation out in the model's own chat format,
+    /// tools included, and splits the reply into reasoning, text and tool calls
+    /// itself. It keeps the KV caches of its last few conversations, so a turn
+    /// that goes on from an earlier reply evaluates only what is new.
+    /// `temperature` 0 picks the most likely token when the model is not
+    /// thinking; Local Code has no other sampling setting.
+    func chat(_ request: ChatRequest) -> AsyncThrowingStream<ChatEvent, any Error> {
+        let (stream, continuation) = AsyncThrowingStream<ChatEvent, any Error>.makeStream()
+        guard let chat = library.chat else {
+            continuation.finish(throwing: LocalCodeLibrary.noChat)
+            return stream
+        }
+        let body: String
+        do {
+            body = String(decoding: try request.chatCompletionsBody(model: Self.requestModel), as: UTF8.self)
+        } catch {
+            continuation.finish(throwing: error)
+            return stream
+        }
+        let turn = ChatTurn(continuation: continuation)
+        let accepted = state.withLock { state in
+            guard state.closing == nil else { return false }
+            state.requests[ObjectIdentifier(turn)] = turn.cancel
+            return true
+        }
+        guard accepted else {
+            continuation.finish(throwing: LocalCodeError.closed)
+            return stream
+        }
+        continuation.onTermination = { [turn] termination in
+            if case .cancelled = termination { turn.cancel() }
+        }
+        LocalCodeLibrary.queue.async { [self] in
+            defer { state.withLock { $0.requests[ObjectIdentifier(turn)] = nil } }
+            guard !turn.isCancelled else {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
+            state.withLock { $0.hasGenerated = true }
+            let status = body.withCString { json in
+                chat(
+                    handle.pointer, json,
+                    { context, chunk in
+                        Unmanaged<ChatTurn>.fromOpaque(context!).takeUnretainedValue().receive(chunk)
+                    },
+                    Unmanaged.passUnretained(turn).toOpaque())
+            }
+            turn.finish(status: status)
+        }
+        return stream
+    }
+
+    func countPromptTokens(_ request: ChatRequest) async throws -> Int {
+        guard let count = library.countChatTokens else { throw LocalCodeLibrary.noChat }
+        let body = String(decoding: try request.chatCompletionsBody(model: Self.requestModel), as: UTF8.self)
+        // Counting lays the prompt out without waiting behind a running turn.
+        // Holding the state meanwhile keeps `close` from letting the handle go.
+        return try state.withLock { state in
+            guard state.closing == nil else { throw LocalCodeError.closed }
+            var message = [CChar](repeating: 0, count: 512)
+            let tokens = body.withCString { count(handle.pointer, $0, &message, Int32(message.count)) }
+            guard tokens >= 0 else { throw LocalCodeError.model(string(fromUTF8: message)) }
+            return Int(tokens)
+        }
+    }
+
+    /// Lets go of the KV caches Local Code keeps for its recent conversations.
+    /// That waits for a running turn to end.
+    func trim(toFree bytes: Int) async -> Int {
+        guard bytes > 0, let trim = library.trim else { return 0 }
+        let freed = try? await library.onQueue { [self] () -> Int in
+            // A close already queued runs after this, so the handle is still the model's.
+            guard state.withLock({ $0.closing == nil }) else { return 0 }
+            return Int(trim(handle.pointer))
+        }
+        return freed ?? 0
+    }
 
     func close() async {
         let closing = state.withLock { state in
             if let closing = state.closing { return closing }
-            for request in state.requests.values { request.cancel() }
+            for cancel in state.requests.values { cancel() }
             let closing = Task<Void, Never> { [library, handle] in
                 // Queued behind the requests just cancelled, so none is still inside the library.
                 _ = try? await library.onQueue { library.close(handle.pointer) }
@@ -232,6 +312,52 @@ final class LocalCodeModel: LoadedModel {
         }
         // Every caller returns only once the model has let go.
         await closing.value
+    }
+}
+
+/// One running chat turn, shared with the library's callback.
+private final class ChatTurn: @unchecked Sendable {
+    private let cancelled = Mutex(false)
+    private let continuation: AsyncThrowingStream<ChatEvent, any Error>.Continuation
+    // The library's callback and `finish` run on the library's queue, one
+    // after the other, so these two need no lock.
+    private var reader = ChatCompletionsStream()
+    private var failure: (any Error)?
+
+    init(continuation: AsyncThrowingStream<ChatEvent, any Error>.Continuation) {
+        self.continuation = continuation
+    }
+
+    var isCancelled: Bool { cancelled.withLock { $0 } }
+
+    @Sendable func cancel() { cancelled.withLock { $0 = true } }
+
+    /// Reads one chunk; a nil one only asks whether to go on. Returns 0 to
+    /// stop the library's turn.
+    func receive(_ chunk: UnsafePointer<CChar>?) -> Int32 {
+        if let chunk, failure == nil {
+            do {
+                for event in try reader.events(fromChunk: Data(String(cString: chunk).utf8)) {
+                    if case .terminated = continuation.yield(event) { cancel() }
+                }
+            } catch {
+                failure = error
+            }
+        }
+        return isCancelled || failure != nil ? 0 : 1
+    }
+
+    /// Ends the stream once the library has returned `status`.
+    func finish(status: Int32) {
+        if let failure {
+            continuation.finish(throwing: failure)
+        } else if status == 1 || isCancelled {
+            continuation.finish(throwing: CancellationError())
+        } else if status == 0 {
+            continuation.finish(throwing: reader.isFinished ? nil : ChatError.incomplete)
+        } else {
+            continuation.finish(throwing: LocalCodeError.generationFailed)
+        }
     }
 }
 
@@ -246,7 +372,7 @@ private final class Request: Sendable {
 
     var isCancelled: Bool { cancelled.withLock { $0 } }
 
-    func cancel() { cancelled.withLock { $0 = true } }
+    @Sendable func cancel() { cancelled.withLock { $0 = true } }
 
     /// Returns 0 to stop the library's generation.
     func deliver(_ tokens: UnsafePointer<Int32>?, _ count: Int32) -> Int32 {

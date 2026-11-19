@@ -12,8 +12,8 @@ routes each model to the engine that can serve it.
 
 ## Status
 
-Early. The engine interface, the router, and the MLX, Local Code, TensorFold,
-mlx-serve and vmlx adapters exist.
+Early. The engine interface, the chat-level interface, the router, and the
+MLX, Local Code, TensorFold, mlx-serve and vmlx adapters exist.
 
 ## Using it
 
@@ -48,9 +48,36 @@ U+FFFD, so decode tokens together, never one event at a time. To show text as
 it arrives, decode the reply so far and emit what that adds to the text
 already shown.
 
-The interface is token-level: the app renders the chat template and parses
-tool calls, so both behave the same on every engine. Cancelling the task that
-consumes a request's stream cancels the request.
+Cancelling the task that consumes a request's stream cancels the request.
+
+### Chat-level models
+
+An engine that already formats prompts and reads replies for its models
+offers them as `ChatModel`s. The app sends the whole conversation and the
+tools it offers; the engine lays them out in the model's own chat format,
+splits the reply into reasoning, text and tool calls, and keeps the caches
+that let a conversation's next turn skip the prompt it has already evaluated.
+The app runs the tools and sends their results in the next request.
+
+```swift
+if let chat = model as? any ChatModel {
+    let request = ChatRequest(
+        messages: [ChatMessage(role: .user, content: "What is the weather in Paris?")],
+        tools: [ChatTool(name: "get_weather", parameters: #"{"type":"object"}"#)])
+    for try await event in chat.chat(request) {
+        switch event {
+        case .reasoning(let text), .text(let text): print(text, terminator: "")
+        case .toolCall(let call): print("\n\(call.name)(\(call.arguments))")
+        case .finished(let completion): print("\n\(completion.cachedPromptTokenCount) cached prompt tokens")
+        }
+    }
+}
+```
+
+`countPromptTokens` counts a request's prompt in the same layout. Between the
+adapter and its engine the request travels as an OpenAI Chat Completions body
+and the reply as its streamed chunks. So far Local Code's models are chat
+models; the others are token-level.
 
 `Router.open` goes to the first engine whose `canServe` accepts the model and
 charges the model's `loadBytes` against the budget. It throws when the model
@@ -134,8 +161,13 @@ ENGINEROUTER_LOCAL_CODE_MODEL_DIR=/path/to/deepseek \
 swift test --filter LocalCodeLiveTests
 ```
 
-Each request starts from an empty KV cache, requests run one at a time, and a
-`temperature` other than 0 samples with the model's own settings.
+Its models are chat models: Local Code's own code lays out DeepSeek 4.1's
+prompts, tools included, and parses its replies. A model keeps the KV caches
+of its last four conversations, so a turn that goes on from an earlier reply
+evaluates only its new tokens; `trim(toFree:)` lets those caches go. Through
+the token-level interface, each request starts from an empty KV cache.
+Requests run one at a time, and a `temperature` other than 0 samples with the
+model's own settings.
 
 ## Building the TensorFold library
 
