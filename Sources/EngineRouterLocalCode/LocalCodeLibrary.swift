@@ -1,6 +1,7 @@
 #if os(macOS)
 import Darwin
 import Dispatch
+import EngineRouter
 import Foundation
 
 /// The Local Code dynamic library and its token-level C entry points.
@@ -37,6 +38,7 @@ final class LocalCodeLibrary: @unchecked Sendable {
     let tokenize: Tokenize
     let detokenize: Detokenize
     let generateTokens: GenerateTokens
+    let buildInfo: EngineBuildInfo?
 
     init(url: URL) throws {
         guard url.isFileURL else { throw LocalCodeError.library("The Local Code library must be a local file.") }
@@ -59,6 +61,7 @@ final class LocalCodeLibrary: @unchecked Sendable {
         tokenize = try symbol("pico_local_code_tokenize_v3")
         detokenize = try symbol("pico_local_code_detokenize_v2")
         generateTokens = try symbol("pico_local_code_generate_tokens_v3")
+        buildInfo = .loadNative(from: handle, symbol: "pico_local_code_build_info_v1")
     }
 
     /// The entry points themselves, for tests that have no library file.
@@ -72,6 +75,7 @@ final class LocalCodeLibrary: @unchecked Sendable {
         self.tokenize = tokenize
         self.detokenize = detokenize
         self.generateTokens = generateTokens
+        self.buildInfo = nil
     }
 
     /// Runs a blocking library call on ``queue``.

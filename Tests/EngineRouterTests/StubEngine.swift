@@ -6,6 +6,7 @@ import Synchronization
 /// name and "generates" a fixed token sequence.
 struct StubEngine: InferenceEngine {
     let name: String
+    var buildInfo: EngineBuildInfo?
     var isExclusive = false
     var loadBytes = 100
     var failsToOpen = false

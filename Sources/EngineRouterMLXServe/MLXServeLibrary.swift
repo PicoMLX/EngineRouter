@@ -1,6 +1,7 @@
 #if os(macOS)
 import Darwin
 import Dispatch
+import EngineRouter
 import Foundation
 
 /// The mlx-serve dynamic library and its C entry points.
@@ -49,6 +50,7 @@ final class MLXServeLibrary: @unchecked Sendable {
     let cancel: Cancel
     let memory: Memory
     let trim: Trim
+    let buildInfo: EngineBuildInfo?
 
     init(url: URL) throws {
         guard url.isFileURL else { throw MLXServeError.library("The mlx-serve library must be a local file.") }
@@ -82,6 +84,7 @@ final class MLXServeLibrary: @unchecked Sendable {
         cancel = try symbol("pico_ms_cancel")
         memory = try symbol("pico_ms_model_memory")
         trim = try symbol("pico_ms_trim")
+        buildInfo = .loadNative(from: handle, symbol: "pico_ms_build_info_v1")
     }
 
     /// The entry points themselves, for tests that have no library file.
@@ -99,6 +102,7 @@ final class MLXServeLibrary: @unchecked Sendable {
         self.cancel = cancel
         self.memory = memory
         self.trim = trim
+        self.buildInfo = nil
     }
 
     /// Runs a blocking library call on ``queue``.

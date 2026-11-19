@@ -18,6 +18,8 @@ public struct MLXServeEngine: InferenceEngine {
 
     private let library: MLXServeLibrary
 
+    public var buildInfo: EngineBuildInfo? { library.buildInfo }
+
     /// - Parameter libraryURL: The `libPicoMlxServe.dylib` to load. Its `mlx.metallib` sits beside it.
     public init(libraryURL: URL) throws {
         library = try MLXServeLibrary(url: libraryURL)

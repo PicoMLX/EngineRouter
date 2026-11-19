@@ -20,6 +20,8 @@ public struct LocalCodeEngine: InferenceEngine {
 
     private let library: LocalCodeLibrary
 
+    public var buildInfo: EngineBuildInfo? { library.buildInfo }
+
     /// - Parameter libraryURL: The `PicoLocalCodeNative.dylib` to load.
     public init(libraryURL: URL) throws {
         library = try LocalCodeLibrary(url: libraryURL)
