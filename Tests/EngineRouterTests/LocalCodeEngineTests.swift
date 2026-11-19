@@ -75,9 +75,23 @@ struct LocalCodeModelTests {
         static let closeMayFinish = DispatchSemaphore(value: 0)
         /// What the fake detokenizer writes: text with a NUL character inside it.
         static let text: [UInt8] = Array("a\u{0}b".utf8)
+        /// What the fake chat entry point streams: thinking, a tool call, the end and the usage.
+        static let chatChunks = [
+            #"{"choices":[{"index":0,"delta":{"reasoning_content":"Look it up."},"finish_reason":null}]}"#,
+            #"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","#
+                + #""function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":null}]}"#,
+            #"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            #"{"choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":12},"#
+                + #""completion_tokens":9}}"#,
+        ]
+        static let chatRequests = Mutex<[String]>([])
+        static let chatStoppedByCallback = Mutex(false)
     }
 
-    private func model(close: @escaping LocalCodeLibrary.Close = { _ in }) -> LocalCodeModel {
+    private func model(
+        close: @escaping LocalCodeLibrary.Close = { _ in }, chat: LocalCodeLibrary.Chat? = nil,
+        countChatTokens: LocalCodeLibrary.CountChatTokens? = nil
+    ) -> LocalCodeModel {
         let library = LocalCodeLibrary(
             open: { _, _, _, _, _ in nil }, close: close, residentBytes: { _ in 1 },
             // One token per byte of the text it is handed.
@@ -101,9 +115,101 @@ struct LocalCodeModelTests {
                 FakeLibrary.generations.withLock { $0 += 1 }
                 usage?[4] = 7
                 return maxTokens == 2 ? 3 : 0
-            })
+            },
+            chat: chat, countChatTokens: countChatTokens)
         return LocalCodeModel(
             library: library, handle: ModelHandle(pointer: UnsafeMutableRawPointer(bitPattern: 1)!), residentBytes: 1)
+    }
+
+    @Test
+    func aChatTurnArrivesAsTheEventsTheLibraryStreams() async throws {
+        let model = model(chat: { _, json, callback, context in
+            FakeLibrary.chatRequests.withLock { $0.append(json.map { String(cString: $0) } ?? "") }
+            for chunk in FakeLibrary.chatChunks {
+                guard chunk.withCString({ callback?(context, $0) }) != 0 else { return 1 }
+            }
+            return 0
+        })
+        let request = ChatRequest(
+            messages: [ChatMessage(role: .user, content: "Weather in Paris?")],
+            tools: [ChatTool(name: "weather", parameters: #"{"type":"object"}"#)])
+
+        var events: [ChatEvent] = []
+        for try await event in model.chat(request) { events.append(event) }
+
+        #expect(Array(events.dropLast()) == [
+            .reasoning("Look it up."),
+            .toolCall(ChatToolCall(id: "call_x", name: "weather", arguments: #"{"city":"Paris"}"#)),
+        ])
+        guard case .finished(let completion) = events.last else {
+            Issue.record("The turn did not finish.")
+            return
+        }
+        #expect(completion.reason == .toolCalls)
+        #expect(completion.promptTokenCount == 20)
+        #expect(completion.cachedPromptTokenCount == 12)
+        // The library gets the conversation and the tools as a Chat Completions body.
+        let sent = try #require(FakeLibrary.chatRequests.withLock { $0.last }.flatMap { $0.data(using: .utf8) })
+        let body = try #require(try JSONSerialization.jsonObject(with: sent) as? [String: Any])
+        #expect((body["messages"] as? [[String: Any]])?.first?["content"] as? String == "Weather in Paris?")
+        #expect((body["tools"] as? [[String: Any]])?.count == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aConsumerThatStopsReadingStopsTheLibrarysTurn() async throws {
+        let model = model(chat: { _, _, callback, context in
+            _ = FakeLibrary.chatChunks[0].withCString { callback?(context, $0) }
+            // Asks whether to go on until the answer is no.
+            while callback?(context, nil) != 0 { usleep(1000) }
+            FakeLibrary.chatStoppedByCallback.withLock { $0 = true }
+            return 1
+        })
+
+        for try await _ in model.chat(ChatRequest(messages: [ChatMessage(role: .user, content: "Hi")])) { break }
+
+        while !FakeLibrary.chatStoppedByCallback.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    @Test
+    func aTurnTheLibraryEndsWithoutItsLastChunkIsIncomplete() async {
+        let model = model(chat: { _, _, callback, context in
+            _ = FakeLibrary.chatChunks[0].withCString { callback?(context, $0) }
+            return 0
+        })
+
+        await #expect(throws: ChatError.incomplete) {
+            for try await _ in model.chat(ChatRequest(messages: [ChatMessage(role: .user, content: "Hi")])) {}
+        }
+    }
+
+    @Test
+    func anErrorTheLibraryWritesIsTheTurnsError() async {
+        let model = model(chat: { _, _, callback, context in
+            _ = #"{"error":{"code":"invalid_request","message":"Too long."}}"#.withCString { callback?(context, $0) }
+            return 2
+        })
+
+        await #expect(throws: ChatError.engine("Too long.")) {
+            for try await _ in model.chat(ChatRequest(messages: [ChatMessage(role: .user, content: "Hi")])) {}
+        }
+    }
+
+    @Test
+    func countingPromptTokensAsksTheLibrary() async throws {
+        let model = model(countChatTokens: { _, json, _, _ in json == nil ? -1 : 42 })
+
+        #expect(try await model.countPromptTokens(ChatRequest(messages: [ChatMessage(role: .user, content: "Hi")])) == 42)
+    }
+
+    @Test
+    func aLibraryBuiltBeforeTheChatEntryPointsSaysToRebuildIt() async {
+        let model = model()
+        let request = ChatRequest(messages: [ChatMessage(role: .user, content: "Hi")])
+
+        await #expect(throws: LocalCodeLibrary.noChat) {
+            for try await _ in model.chat(request) {}
+        }
+        await #expect(throws: LocalCodeLibrary.noChat) { try await model.countPromptTokens(request) }
     }
 
     @Test
@@ -251,6 +357,61 @@ struct LocalCodeLiveTests {
         await #expect(throws: LocalCodeError.closed) {
             for try await _ in loaded.generate(EngineRequest(promptTokens: prompt)) {}
         }
+    }
+
+    /// A tool call, its result and the answer, laid out and read by Local
+    /// Code's own chat format. The second turn goes on from the first one's
+    /// reply, so Local Code takes its start from the first turn's KV cache.
+    @Test(.timeLimit(.minutes(30)))
+    func aToolRoundTripRunsThroughLocalCodesChatFormat() async throws {
+        let engine = try LocalCodeEngine(libraryURL: URL(fileURLWithPath: try #require(LiveLocalCode.library)))
+        let router = Router(engines: [engine], memoryBudget: Int(ProcessInfo.processInfo.physicalMemory))
+        let model = EngineModel(
+            id: "deepseek-4.1-flash", directory: URL(fileURLWithPath: try #require(LiveLocalCode.modelDirectory)))
+        let chat = try #require(try await router.open(model) as? any ChatModel)
+        let weather = ChatTool(
+            name: "get_weather", description: "Today's weather in a city.",
+            parameters: #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#)
+        var messages = [ChatMessage(role: .user, content: "What is the weather in Paris today? Use the tool.")]
+
+        let first = try await turn(chat, ChatRequest(
+            messages: messages, tools: [weather], reasoning: false, maxTokens: 512, temperature: 0))
+        print("Local Code called: \(first.calls), after \(first.text.debugDescription)")
+        let call = try #require(first.calls.first)
+        #expect(call.name == "get_weather")
+        #expect(call.arguments.contains("Paris"))
+        #expect(first.completion.reason == .toolCalls)
+
+        messages.append(ChatMessage(role: .assistant, content: first.text, toolCalls: first.calls))
+        messages.append(ChatMessage(role: .tool, content: #"{"forecast":"sunny","celsius":21}"#, toolCallID: call.id))
+        let request = ChatRequest(messages: messages, tools: [weather], reasoning: false, maxTokens: 512, temperature: 0)
+        let counted = try await chat.countPromptTokens(request)
+        let second = try await turn(chat, request)
+        print("Local Code answered: \(second.text)")
+        print("Second turn: \(second.completion.promptTokenCount) prompt tokens, \(second.completion.cachedPromptTokenCount) cached; counted \(counted)")
+        #expect(second.text.contains("21") || second.text.localizedCaseInsensitiveContains("sunny"))
+        #expect(second.completion.reason == .stop)
+        #expect(second.completion.promptTokenCount == counted)
+        #expect(second.completion.cachedPromptTokenCount > 0)
+
+        await router.close(model.id)
+    }
+
+    private func turn(
+        _ model: any ChatModel, _ request: ChatRequest
+    ) async throws -> (text: String, calls: [ChatToolCall], completion: ChatCompletion) {
+        var text = ""
+        var calls: [ChatToolCall] = []
+        var completion: ChatCompletion?
+        for try await event in model.chat(request) {
+            switch event {
+            case .text(let piece): text += piece
+            case .reasoning: break
+            case .toolCall(let call): calls.append(call)
+            case .finished(let finished): completion = finished
+            }
+        }
+        return (text, calls, try #require(completion))
     }
 
     @Test(.timeLimit(.minutes(30)))
