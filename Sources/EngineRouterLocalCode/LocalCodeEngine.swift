@@ -3,9 +3,10 @@ import EngineRouter
 import Foundation
 import Synchronization
 
-/// Runs DeepSeek 4.1 checkpoints with Local Code's engine, loaded from a
-/// dynamic library built from the Local Code fork. Its models are
-/// ``ChatModel``s: Local Code formats the conversation and reads the reply.
+/// Runs DeepSeek 4.1 and GLM 5.3 Flash checkpoints with Local Code's engine,
+/// loaded from a dynamic library built from the Local Code fork. Its models
+/// are ``ChatModel``s: Local Code formats the conversation and reads the
+/// reply. Only DeepSeek 4.1 also serves the token-level calls.
 ///
 /// Local Code is GPL-3.0. See the licence note in the README before shipping
 /// an app that includes the library.
@@ -43,26 +44,31 @@ public struct LocalCodeEngine: InferenceEngine {
     public func open(_ model: EngineModel) async throws -> any LoadedModel {
         let handle = try await openHandle(model)
         let bytes = try await library.onQueue { [library] in Int(library.residentBytes(handle.pointer)) }
-        return LocalCodeModel(library: library, handle: handle, residentBytes: bytes)
+        let servesTokens = ModelFiles(directory: model.directory)?.servesTokens ?? false
+        return LocalCodeModel(library: library, handle: handle, residentBytes: bytes, servesTokens: servesTokens)
     }
 
     private func openHandle(_ model: EngineModel) async throws -> ModelHandle {
         guard let files = ModelFiles(directory: model.directory) else {
             throw LocalCodeError.model("\(model.directory.lastPathComponent) holds no Local Code checkpoint.")
         }
-        return try await library.onQueue { [library] in
+        // Only the entry point that opens every family takes a checkpoint without an Engram file.
+        guard let entryPoint = files.engram == nil ? library.openAnyFamily : library.open else {
+            throw LocalCodeError.library(
+                "The Local Code library opens DeepSeek 4.1 only. Rebuild it from the fork to open GLM 5.3 Flash.")
+        }
+        return try await library.onQueue {
             var message = [CChar](repeating: 0, count: 512)
-            let pointer = files.checkpoint.path.withCString { checkpoint in
-                files.engram.path.withCString { engram in
+            func openFiles(_ engram: UnsafePointer<CChar>?) -> UnsafeMutableRawPointer? {
+                files.checkpoint.path.withCString { checkpoint in
                     if let drafter = files.drafter {
-                        drafter.path.withCString {
-                            library.open(checkpoint, engram, $0, &message, Int32(message.count))
-                        }
+                        drafter.path.withCString { entryPoint(checkpoint, engram, $0, &message, Int32(message.count)) }
                     } else {
-                        library.open(checkpoint, engram, nil, &message, Int32(message.count))
+                        entryPoint(checkpoint, engram, nil, &message, Int32(message.count))
                     }
                 }
             }
+            let pointer = if let engram = files.engram { engram.path.withCString(openFiles) } else { openFiles(nil) }
             guard let pointer else {
                 throw LocalCodeError.model(string(fromUTF8: message))
             }
@@ -82,24 +88,44 @@ struct ModelHandle: @unchecked Sendable {
     let pointer: UnsafeMutableRawPointer
 }
 
+/// A Local Code model's files: a DeepSeek 4.1 checkpoint with its `.engram`
+/// file and optionally a DSpark drafter, or a GLM 5.3 Flash checkpoint, named
+/// `glm_5.3_flash_*.ckpt` as Local Code names it, and optionally a DFlash2
+/// drafter.
 struct ModelFiles: Equatable {
     let checkpoint: URL
-    let engram: URL
+    /// DeepSeek 4.1's Engram file; nil for GLM 5.3 Flash.
+    let engram: URL?
     let drafter: URL?
+
+    /// Whether the token-level calls serve the model. They speak DeepSeek 4.1's
+    /// tokens; GLM 5.3 Flash is served through `chat` only.
+    var servesTokens: Bool { engram != nil }
 
     init?(directory: URL) {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil)) ?? []
+        func checkpoints(_ isIncluded: (String) -> Bool) -> [URL] {
+            files.filter { $0.pathExtension == "ckpt" && isIncluded($0.lastPathComponent) }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
         let engrams = files.filter { $0.pathExtension == "engram" }
-        guard engrams.count == 1 else { return nil }
-        let checkpoint = engrams[0].deletingPathExtension().appendingPathExtension("ckpt")
-        guard files.contains(where: { $0.lastPathComponent == checkpoint.lastPathComponent }) else { return nil }
-        self.engram = engrams[0]
-        self.checkpoint = checkpoint
-        self.drafter = files
-            .filter { $0.pathExtension == "ckpt" && $0.lastPathComponent.contains("dspark") }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-            .first
+        if engrams.count == 1 {
+            let checkpoint = engrams[0].deletingPathExtension().appendingPathExtension("ckpt")
+            guard files.contains(where: { $0.lastPathComponent == checkpoint.lastPathComponent }) else { return nil }
+            self.engram = engrams[0]
+            self.checkpoint = checkpoint
+            self.drafter = checkpoints { $0.contains("dspark") }.first
+        } else if engrams.isEmpty {
+            let glm = checkpoints { $0.hasPrefix("glm_5.3_flash") }
+            let models = glm.filter { !$0.lastPathComponent.contains("dflash") }
+            guard models.count == 1 else { return nil }
+            self.engram = nil
+            self.checkpoint = models[0]
+            self.drafter = glm.first { $0.lastPathComponent.contains("dflash") }
+        } else {
+            return nil
+        }
     }
 }
 
@@ -119,18 +145,22 @@ final class LocalCodeModel: ChatModel {
     private let library: LocalCodeLibrary
     private let handle: ModelHandle
     private let residentBytes: Int
+    /// Whether the token-level calls serve this model; see `ModelFiles.servesTokens`.
+    private let servesTokens: Bool
     private let state = Mutex(State())
 
-    init(library: LocalCodeLibrary, handle: ModelHandle, residentBytes: Int) {
+    init(library: LocalCodeLibrary, handle: ModelHandle, residentBytes: Int, servesTokens: Bool = true) {
         self.library = library
         self.handle = handle
         self.residentBytes = residentBytes
+        self.servesTokens = servesTokens
     }
 
     // The tokenizer is immutable static state in the library, so these two do
     // not wait behind a running generation.
 
     func tokenize(_ text: String) async throws -> [Int] {
+        guard servesTokens else { throw LocalCodeError.chatOnly }
         // Passed with its length, so a NUL character in the text is kept.
         let bytes = Array(text.utf8)
         let count = library.tokenize(bytes, Int32(bytes.count), nil, 0)
@@ -141,6 +171,7 @@ final class LocalCodeModel: ChatModel {
     }
 
     func detokenize(_ tokens: [Int]) async throws -> String {
+        guard servesTokens else { throw LocalCodeError.chatOnly }
         let ids = tokens.map { Int32(clamping: $0) }
         let length = library.detokenize(ids, Int32(ids.count), nil, 0)
         var text = [CChar](repeating: 0, count: Int(length) + 1)
@@ -154,6 +185,10 @@ final class LocalCodeModel: ChatModel {
     /// with the model's own settings. Local Code has no `topP`.
     func generate(_ request: EngineRequest) -> AsyncThrowingStream<EngineEvent, any Error> {
         let (stream, continuation) = AsyncThrowingStream<EngineEvent, any Error>.makeStream()
+        guard servesTokens else {
+            continuation.finish(throwing: LocalCodeError.chatOnly)
+            return stream
+        }
         if let limit = request.maxTokens, limit <= 0 {
             // A limit of no tokens ends the request before the library sees it:
             // the library reads 0 as "no limit", which is what `nil` asks for.

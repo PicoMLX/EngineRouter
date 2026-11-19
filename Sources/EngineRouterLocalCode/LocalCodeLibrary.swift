@@ -43,7 +43,10 @@ final class LocalCodeLibrary: @unchecked Sendable {
     /// run one at a time, off Swift's cooperative executor.
     static let queue = DispatchQueue(label: "enginerouter.local-code", qos: .userInitiated)
 
-    let open: Open
+    /// Opens DeepSeek 4.1 only; it needs the Engram file.
+    let open: Open?
+    /// Opens every family the library serves; a library built before GLM 5.3 Flash lacks it.
+    let openAnyFamily: Open?
     let close: Close
     let residentBytes: ResidentBytes
     let tokenize: Tokenize
@@ -70,15 +73,16 @@ final class LocalCodeLibrary: @unchecked Sendable {
             }
             return unsafeBitCast(address, to: T.self)
         }
-        open = try symbol("pico_local_code_open_v2")
+        func optionalSymbol<T>(_ name: String) -> T? {
+            dlsym(handle, name).map { unsafeBitCast($0, to: T.self) }
+        }
+        open = try symbol("pico_local_code_open_v2") as Open
+        openAnyFamily = optionalSymbol("pico_local_code_open_v3")
         close = try symbol("pico_local_code_close_v2")
         residentBytes = try symbol("pico_local_code_resident_bytes_v2")
         tokenize = try symbol("pico_local_code_tokenize_v3")
         detokenize = try symbol("pico_local_code_detokenize_v2")
         generateTokens = try symbol("pico_local_code_generate_tokens_v3")
-        func optionalSymbol<T>(_ name: String) -> T? {
-            dlsym(handle, name).map { unsafeBitCast($0, to: T.self) }
-        }
         chat = optionalSymbol("pico_local_code_chat_v1")
         countChatTokens = optionalSymbol("pico_local_code_count_chat_tokens_v1")
         trim = optionalSymbol("pico_local_code_trim_v1")
@@ -87,10 +91,12 @@ final class LocalCodeLibrary: @unchecked Sendable {
 
     /// The entry points themselves, for tests that have no library file.
     init(
-        open: Open, close: Close, residentBytes: ResidentBytes, tokenize: Tokenize, detokenize: Detokenize,
+        open: Open, openAnyFamily: Open? = nil, close: Close, residentBytes: ResidentBytes, tokenize: Tokenize,
+        detokenize: Detokenize,
         generateTokens: GenerateTokens, chat: Chat? = nil, countChatTokens: CountChatTokens? = nil, trim: Trim? = nil
     ) {
         self.open = open
+        self.openAnyFamily = openAnyFamily
         self.close = close
         self.residentBytes = residentBytes
         self.tokenize = tokenize
@@ -120,6 +126,8 @@ public enum LocalCodeError: Error, Equatable, CustomStringConvertible {
     /// The model's files are missing or are not a Local Code checkpoint.
     case model(String)
     case invalidText
+    /// A token-level call on a model served through `chat` only.
+    case chatOnly
     case generationFailed
     case closed
 
@@ -127,6 +135,7 @@ public enum LocalCodeError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .library(let message), .model(let message): message
         case .invalidText: "Local Code could not read the text as UTF-8."
+        case .chatOnly: "This Local Code model is served through chat only: its tokens are not DeepSeek 4.1's."
         case .generationFailed: "Local Code failed to generate."
         case .closed: "The Local Code model is closed."
         }
