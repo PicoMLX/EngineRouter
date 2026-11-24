@@ -16,7 +16,7 @@
       "location" : "https://github.com/PicoMLX/mlx-swift",
       "state" : {
         "branch" : "pico/integration",
-        "revision" : "61c423cba46e62c18aebb0991c0f00eaeabd4b76"
+        "revision" : "ed2ad96062a233af30226afdfcb8faa85dbf92f9"
       }
     },
     {
@@ -25,7 +25,7 @@
       "location" : "https://github.com/PicoMLX/mlx-swift-lm",
       "state" : {
         "branch" : "pico/integration",
-        "revision" : "4a39bfae13e116610d9eed241b43699d95b02fe4"
+        "revision" : "d30871cd6704ac7e3ae090bcd5c3e0d1a72dc71d"
       }
     },
     {
