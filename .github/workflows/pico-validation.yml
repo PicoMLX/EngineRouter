@@ -27,6 +27,7 @@ jobs:
         run: |
           xcodebuild test -scheme EngineRouter-Package -destination 'platform=macOS' \
             -derivedDataPath .build/contracts -jobs 3 \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -skipMacroValidation -skipPackagePluginValidation \
             -only-testing:EngineRouterTests
   vmlx-helper:
